@@ -123,8 +123,30 @@ jobs:
           GH_REPO: ${{ github.repository }}
           SELECTED: ${{ github.event.inputs.environment || 'ambos' }}
           MAX_OVERRIDE: ${{ github.event.inputs.max_set || '' }}
+          CHANGED_LABEL: ${{ github.event.label.name || '' }}
         run: |
           set -euo pipefail
+
+          # A label blocked:<env> e aplicada e removida pelo PROPRIO notify.sh.
+          # Sem este filtro, cada conflito custa uma reconstrucao inteira a mais:
+          # o job marca o PR -> o `labeled` dispara outro rebuild -> ele monta o
+          # mesmo conjunto, conclui no-op e encerra. Nao e laco infinito (o
+          # segundo run nao mexe em label nenhuma), mas e um ciclo de docker
+          # build jogado fora a cada transicao de estado.
+          case "${CHANGED_LABEL:-}" in
+            blocked:*)
+              echo "Label '$CHANGED_LABEL' e a marca de estado do proprio job. Ignorando."
+              echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
+              echo "any=false" >> "$GITHUB_OUTPUT"
+              {
+                echo "### Ambientes a reconstruir"
+                echo ""
+                echo "Nenhum. O evento foi a label \`$CHANGED_LABEL\`, que e a marca de"
+                echo "estado escrita por este mesmo workflow."
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+              ;;
+          esac
 
           include='[]'
 

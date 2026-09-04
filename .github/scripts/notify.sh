@@ -42,6 +42,21 @@ remove_label() {
   gh api -X DELETE "repos/$REPO/issues/$1/labels/$2" --silent 2>/dev/null || true
 }
 
+# Marcador invisivel no corpo do comentario. E a memoria que sobrevive a uma
+# execucao cancelada no meio: a label so e aplicada DEPOIS do comentario, entao
+# um cancelamento nessa janela faria a proxima execucao comentar de novo.
+#
+# Guardamos o ULTIMO estado comentado, e nao "ja comentei alguma vez": uma branch
+# que conflita, volta, e conflita de novo precisa ser avisada nas duas vezes.
+marker() { printf '<!-- rebuild-env:%s:%s -->' "$ENV_NAME" "$1"; }
+
+last_commented_state() {
+  gh api "repos/$REPO/issues/$1/comments?per_page=100" --paginate --jq '.[].body' 2>/dev/null \
+    | grep -oE "<!-- rebuild-env:${ENV_NAME}:(conflict|back) -->" \
+    | tail -1 \
+    | sed -E 's/.*:(conflict|back) -->/\1/'
+}
+
 post_comment() {
   if [ "$DRY_RUN" = "true" ]; then
     printf '\n----- comentario para #%s -----\n%s\n-----\n' "$1" "$2" >&2
@@ -81,6 +96,14 @@ while read -r row; do
 
   if has_mark "$pr"; then
     log "#$pr segue em conflito -> silencio (ja tem $BLOCKED_LABEL)"
+    continue
+  fi
+
+  # Sem a marca, mas o ultimo comentario meu neste PR ja foi de conflito: uma
+  # execucao anterior comentou e morreu antes de marcar. So repoe a marca.
+  if [ "$(last_commented_state "$pr")" = "conflict" ]; then
+    log "#$pr ja tinha sido avisado -> repondo so a marca"
+    add_label "$pr" "$BLOCKED_LABEL"
     continue
   fi
 
@@ -127,6 +150,7 @@ sendo o único caminho para produção.
 
 <sub>🤖 \`rebuild-env\` — comento só em mudança de estado. Enquanto o conflito
 persistir, silêncio. A label \`$BLOCKED_LABEL\` é a marca desse estado.</sub>
+$(marker conflict)
 BODY_EOF
 )"
 
@@ -145,6 +169,12 @@ while read -r row; do
 
   has_mark "$pr" || continue
 
+  if [ "$(last_commented_state "$pr")" = "back" ]; then
+    log "#$pr ja tinha sido avisado do retorno -> so removendo a marca"
+    remove_label "$pr" "$BLOCKED_LABEL"
+    continue
+  fi
+
   BODY="$(cat <<BODY_EOF
 ### ✅ De volta ao ambiente \`$ENV_NAME\`
 
@@ -156,6 +186,7 @@ Conjunto no ar: \`$SUMMARY\`$(env_link)
 $PUBLISHED_LIST
 
 <sub>🤖 \`rebuild-env\` — a marca \`$BLOCKED_LABEL\` foi removida.</sub>
+$(marker back)
 BODY_EOF
 )"
 

@@ -1,0 +1,118 @@
+# ---------------------------------------------------------------------------
+# label-ttl.yml
+#
+# POR QUE EXISTE
+#
+# A label deploy:<env> e uma reserva de espaco num recurso compartilhado. Sem
+# prazo de validade, ela vira lixo: PR abandonado em fevereiro continua ocupando
+# vaga em hom em novembro, o teto do conjunto estoura e ninguem sabe por que.
+#
+# Este job expira a reserva por inatividade -- N dias sem PUSH na branch. E de
+# proposito que a metrica seja push, e nao "atualizacao do PR": comentario e
+# review nao significam que o codigo esta vivo.
+#
+# Nao fecha PR, nao apaga branch, nao julga merito. So devolve a vaga.
+# ---------------------------------------------------------------------------
+name: label-ttl
+
+on:
+  schedule:
+    # 06:00 UTC (03:00 em Sao Paulo) -- antes de qualquer um comecar o dia.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Dias sem push para expirar a label (use 1 na demo)"
+        required: false
+        default: "3"
+      dry_run:
+        description: "So listar, sem remover nada"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  expire:
+    name: expirar labels deploy:*
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Exigir credenciais do GitHub App
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+        run: |
+          if [ -z "${APP_ID:-}" ] || [ -z "${APP_PRIVATE_KEY:-}" ]; then
+            echo "::error title=GitHub App nao configurado::Ver SETUP.md, secao 1."
+            exit 1
+          fi
+
+      - name: Token do GitHub App
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Expirar
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          DAYS: ${{ github.event.inputs.days || '3' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: |
+          set -euo pipefail
+          cutoff=$(( $(date -u +%s) - DAYS * 86400 ))
+          echo "Expirando labels deploy:* de PRs sem push ha mais de ${DAYS} dia(s)."
+          echo ""
+
+          for env_name in dev hom; do
+            label="deploy:${env_name}"
+
+            gh pr list --state open --label "$label" --limit 100 \
+               --json number,headRefName,headRefOid,author \
+               --jq '.[] | [.number, .headRefName, .headRefOid, .author.login] | @tsv' \
+            | while IFS=$'\t' read -r pr branch sha author; do
+                [ -n "${pr:-}" ] || continue
+
+                # Data do commit do topo da branch = data do ultimo push util.
+                pushed=$(gh api "repos/${GH_REPO}/commits/${sha}" \
+                          --jq '.commit.committer.date')
+                pushed_ts=$(date -u -d "$pushed" +%s)
+                age_days=$(( ( $(date -u +%s) - pushed_ts ) / 86400 ))
+
+                if [ "$pushed_ts" -ge "$cutoff" ]; then
+                  echo "  mantem  #${pr} ${branch} (${age_days}d) [$label]"
+                  continue
+                fi
+
+                echo "  EXPIRA  #${pr} ${branch} (${age_days}d) [$label]"
+                if [ "$DRY_RUN" = "true" ]; then
+                  echo "          (dry-run: nada removido)"
+                  continue
+                fi
+
+                {
+                  echo "### ⏳ Label \`${label}\` removida por inatividade"
+                  echo ""
+                  echo "Sem push em \`${branch}\` ha **${age_days} dia(s)** (limite: ${DAYS})."
+                  echo ""
+                  echo "A label deploy e uma reserva de vaga num ambiente compartilhado:"
+                  echo "sem prazo, PR parado ocupa espaco de PR ativo ate o teto do"
+                  echo "conjunto estourar."
+                  echo ""
+                  echo "**Nada aconteceu com o seu PR.** Ele continua aberto, com os"
+                  echo "mesmos commits e o mesmo review. So saiu do conjunto de \`${env_name}\`."
+                  echo ""
+                  echo "Para voltar: aplique \`${label}\` de novo. A proxima reconstrucao"
+                  echo "inclui a branch sem voce fazer mais nada."
+                  echo ""
+                  echo "<sub>🤖 \`label-ttl\` — @${author}</sub>"
+                } > /tmp/ttl-comment-${pr}.md
+                gh pr comment "$pr" --body-file "/tmp/ttl-comment-${pr}.md"
+                gh pr edit "$pr" --remove-label "$label"
+              done
+          done

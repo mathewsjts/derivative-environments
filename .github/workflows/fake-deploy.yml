@@ -1,0 +1,72 @@
+# ---------------------------------------------------------------------------
+# fake-deploy.yml
+#
+# POR QUE EXISTE -- e por que ele NAO e um placeholder.
+#
+# Este workflow prova, ao vivo, a unica coisa que pode quebrar o modelo inteiro
+# de forma silenciosa: um push feito por automacao com o GITHUB_TOKEN padrao
+# NAO dispara workflows. O GitHub bloqueia isso para evitar recursao.
+#
+# O que aconteceria com o GITHUB_TOKEN:
+#   push na branch de ambiente -> OK, a branch atualiza
+#   deploy disparado por push  -> nunca roda
+#   erro                       -> nenhum. Nenhum log, nenhum aviso.
+#
+# Voce so descobriria olhando o ambiente e percebendo que ele esta velho. Por
+# isso o rebuild-env autentica com GitHub App: token de App dispara workflows.
+#
+# Se este job aparecer na aba Actions depois de uma reconstrucao, a prova esta
+# feita. Se nao aparecer, o token esta errado. E o item 2 do DEMO.md.
+#
+# Num repo de verdade, aqui e onde o deploy de fato aconteceria. Nesta POC quem
+# deploya e a Vercel, pela integracao Git nativa -- que tem exatamente a mesma
+# dependencia: ela reage ao push na branch.
+# ---------------------------------------------------------------------------
+name: fake-deploy
+
+on:
+  push:
+    branches: [dev, hom]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: deploy simulado de ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: O que foi publicado
+        run: |
+          set -euo pipefail
+          echo "==================================================="
+          echo " DEPLOY DISPARADO POR PUSH"
+          echo "==================================================="
+          echo " ambiente : ${{ github.ref_name }}"
+          echo " sha      : ${{ github.sha }}"
+          echo " push por : ${{ github.actor }}"
+          echo "---------------------------------------------------"
+          echo " conjunto : $(jq -r '[.base.branch] + [.features[].branch] | join(" + ")' build-manifest.json)"
+          echo " base     : $(jq -r '.base.sha' build-manifest.json)"
+          echo "---------------------------------------------------"
+          echo " features neste build:"
+          jq -r 'if (.features | length) == 0 then "   (nenhuma)"
+                 else (.features[] | "   #\(.pr) \(.branch) @\(.author)") end' build-manifest.json
+          echo " fora deste build:"
+          jq -r 'if (.excluded | length) == 0 then "   (nenhuma)"
+                 else (.excluded[] | "   #\(.pr) \(.branch) -- conflito em \(.files | join(", "))") end' build-manifest.json
+          echo "==================================================="
+
+          {
+            echo "## 🚀 \`${{ github.ref_name }}\` publicado"
+            echo ""
+            echo "**Conjunto:** \`$(jq -r '[.base.branch] + [.features[].branch] | join(" + ")' build-manifest.json)\`"
+            echo ""
+            echo "SHA \`${{ github.sha }}\` — push feito por \`${{ github.actor }}\`."
+            echo ""
+            echo "> Este job rodou porque o push veio de um **GitHub App**."
+            echo "> Com o \`GITHUB_TOKEN\` padrao ele nao teria rodado, e nao haveria erro nenhum."
+          } >> "$GITHUB_STEP_SUMMARY"

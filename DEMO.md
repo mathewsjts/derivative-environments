@@ -221,7 +221,17 @@ continua em silêncio.
 `main` agora. B continua fora — e **não recebeu comentário**, porque o estado
 dela não mudou.
 
-**Mostrar:** o PR #2 de B, com o job `sincronia com a main` **vermelho**.
+**Mostrar:** o job `sync-prs`. Ele atualizou o PR de C sozinho — a `main` andou,
+a branch acompanhou, ninguém fez nada. E **não conseguiu** atualizar o de B:
+
+> Conflito. O job não resolve conflito, nem aqui nem na montagem do ambiente:
+> ele pula e segue. É a mesma regra nos dois lugares, e é o único ponto do
+> processo onde uma pessoa precisa entrar.
+
+**Mostrar:** o PR #2 de B, agora marcado como **out-of-date** pelo GitHub — o
+merge está bloqueado porque a `main` andou. (O job `sincronia com a main` diz a
+mesma coisa com uma mensagem explicando o rebase, mas ele só re-executa no
+próximo push da branch; quem percebe a `main` andando é a regra do ruleset.)
 
 > Agora o gate diz para B o que fazer, e a diferença é toda: o conflito de B
 > não é mais contra a branch especulativa de alguém. É contra código real,
@@ -357,6 +367,17 @@ Advisory novo publicado entre o ensaio e a demo. Não tente consertar no palco:
 
 E siga — nenhum bloco depende desse job estar verde, exceto o merge do bloco 5.
 Se travar o merge, use **Merge without waiting for requirements** (você é admin).
+
+### Um PR ficou para trás da `main`
+
+Normalmente o `sync-prs` resolve sozinho no push da `main`. Para forçar:
+
+```bash
+gh workflow run sync-prs.yml
+gh workflow run sync-prs.yml -f dry_run=true    # só listar
+```
+
+Se ele reportar conflito, é rebase manual mesmo — o job não resolve conflito.
 
 ### Esvaziar um ambiente inteiro de uma vez
 

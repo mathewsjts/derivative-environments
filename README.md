@@ -133,7 +133,7 @@ dia em quarenta comentários.
 Sem `git rerere`, sem fila de prioridade entre branches, sem merge queue, sem
 ambiente efêmero por PR. São otimizações para problemas cuja frequência ainda
 não foi medida. Este é o mínimo que resolve o que dói hoje — e é ele que produz
-o dado para justificar (ou descartar) a próxima peça.
+o dado para justificar (ou descartar) a próxima peça
 
 ## Rodando local
 

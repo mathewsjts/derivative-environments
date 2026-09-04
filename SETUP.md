@@ -230,22 +230,40 @@ buildar o Dockerfile.
 
 1. <https://vercel.com/new> → importe o repositório
 2. **Framework Preset**: `Other`
-3. **Root Directory**: `./` — não mexa em Build/Output Command
-4. **Deploy**
+3. **Root Directory**: `./`
+4. **Build and Output Settings**: não mexa. O [vercel.json](vercel.json) já
+   define `buildCommand` e `outputDirectory`, e o que está no arquivo tem
+   precedência sobre o que estiver no dashboard.
+5. **Deploy**
+
+> **Se aparecer `Error: No Output Directory named "public" found`:** é o
+> zero-config da Vercel. Ele detecta o script `build` do `package.json`, roda
+> `tsc`, e depois procura uma pasta estática — que esta POC não tem, porque a
+> API inteira é uma Serverless Function.
+>
+> O repositório já resolve isso: `vercel.json` declara um `buildCommand` que não
+> faz nada e um `outputDirectory` apontando para `public/`, que existe e está
+> vazia de propósito. Se o erro persistir, confira em **Settings → Build and
+> Deployment** se alguém marcou **Override** em *Output Directory* — um override
+> no dashboard com valor vazio vence o `vercel.json`. Desmarque.
+>
+> A pasta `public/` fica vazia porque o filesystem é consultado **antes** dos
+> rewrites: um `index.html` ali passaria a responder `GET /` no lugar da API, e
+> é justamente `/` que o bloco 1 do DEMO.md abre no browser.
 
 Depois do primeiro deploy:
 
-5. **Settings → Git**: confirme que a **Production Branch** é `main` e que
+6. **Settings → Git**: confirme que a **Production Branch** é `main` e que
    *todas* as outras branches geram Preview Deployment (é o padrão). São os
    previews de `dev` e `hom` que a demo usa.
-6. As URLs de preview são estáveis por branch:
+7. As URLs de preview são estáveis por branch:
 
 ```
 https://<projeto>-git-dev-<escopo>.vercel.app/version
 https://<projeto>-git-hom-<escopo>.vercel.app/version
 ```
 
-7. Grave as URLs como variáveis do repositório. O `rebuild-env` usa isso para
+8. Grave as URLs como variáveis do repositório. O `rebuild-env` usa isso para
    colocar o link do ambiente dentro do comentário do PR:
 
 ```bash

@@ -1,0 +1,7 @@
+Diretorio de saida estatica exigido pela Vercel (outputDirectory em vercel.json).
+
+Fica vazio de proposito. Esta POC nao serve nada estatico: toda rota e servida
+pela Serverless Function em api/index.ts, via o rewrite do vercel.json. Se
+houvesse um index.html aqui, ele venceria o rewrite em "/" -- o filesystem e
+consultado antes dos rewrites -- e GET / deixaria de responder o conjunto
+publicado, que e o que o DEMO.md mostra no bloco 1.

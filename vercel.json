@@ -1,4 +1,11 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+
+  "//": "Este projeto NAO tem saida estatica: a API inteira e uma Serverless Function em api/index.ts, que a propria Vercel compila. Sem as duas chaves abaixo, o zero-config detecta o script 'build' do package.json, roda 'tsc', e depois procura um diretorio estatico chamado 'public' -- que nao existe. O erro e 'No Output Directory named public found'. As chaves aqui tem precedencia sobre o que estiver no dashboard.",
+
+  "buildCommand": "echo 'sem build estatico: a API e uma Serverless Function em api/index.ts'",
+  "outputDirectory": "public",
+
+  "//rewrites": "A pasta public/ esta vazia de proposito (so um .keep). Como nenhum arquivo estatico casa com a requisicao, TODA rota cai no rewrite abaixo e e servida pela function -- inclusive '/'.",
   "rewrites": [{ "source": "/(.*)", "destination": "/api" }]
 }

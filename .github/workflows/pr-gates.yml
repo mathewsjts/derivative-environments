@@ -1,0 +1,203 @@
+# ---------------------------------------------------------------------------
+# pr-gates.yml
+#
+# POR QUE EXISTE
+#
+# No modelo antigo (uma branch de longa duracao por ambiente) o review acontece
+# na branch de homologacao e os gates rodam depois do merge -- e ai o Sonar
+# reprova codigo que ja esta em hom. Aqui existe UM PR por feature, sempre
+# feat/X -> main, e este workflow e o unico portao. Nada chega na main sem
+# passar por ele, e nada chega em dev/hom sem estar num PR aberto para a main.
+#
+# Os jobs sao paralelos de proposito: o orcamento da POC e CI de PR abaixo de
+# 2 minutos de relogio de parede.
+# ---------------------------------------------------------------------------
+name: pr-gates
+
+on:
+  pull_request:
+    branches: [main]
+
+# Push novo no PR cancela a verificacao antiga: ninguem precisa do resultado
+# de um commit que ja foi substituido.
+concurrency:
+  group: pr-gates-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  # -------------------------------------------------------------------------
+  # typecheck + lint + testes. Um job so porque compartilham o mesmo npm ci.
+  # -------------------------------------------------------------------------
+  verify:
+    name: typecheck / lint / testes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: typecheck
+        run: npm run typecheck
+
+      - name: lint
+        run: npm run lint
+
+      - name: testes
+        run: npm test
+
+  # -------------------------------------------------------------------------
+  # npm audit
+  #
+  # --omit=dev de proposito: vulnerabilidade em vitest/eslint nao vai para
+  # producao, e reprovar PR por causa de ferramenta de desenvolvimento treina
+  # todo mundo a ignorar o gate. O que embarca e o que e auditado.
+  # -------------------------------------------------------------------------
+  audit:
+    name: npm audit (producao)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm audit --omit=dev --audit-level=high
+
+  # -------------------------------------------------------------------------
+  # docker build
+  #
+  # GATE, NAO DEPLOY. A Vercel nunca le este Dockerfile -- ela roda a API como
+  # funcao serverless. O build existe para provar que o codigo instala e compila
+  # com dependencias de producao, e e o mesmo comando que o rebuild-env roda
+  # sobre o CONJUNTO montado antes de publicar um ambiente.
+  # -------------------------------------------------------------------------
+  docker:
+    name: docker build (gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: docker build (sem cache, cronometrado)
+        run: |
+          start=$(date +%s)
+          docker build --no-cache -t derivative-environments:pr-${{ github.event.pull_request.number }} .
+          elapsed=$(( $(date +%s) - start ))
+          echo "docker build levou ${elapsed}s"
+          echo "### 🐳 docker build: ${elapsed}s (orcamento: 30s)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$elapsed" -gt 30 ]; then
+            echo "::warning::docker build passou de 30s (${elapsed}s). Ver .dockerignore e os estagios do Dockerfile."
+          fi
+
+  # -------------------------------------------------------------------------
+  # SonarCloud
+  #
+  # Sem SONAR_TOKEN o passo FALHA e diz o que configurar. Nunca passa verde por
+  # ausencia de token: um gate que se desliga sozinho quando falta credencial e
+  # pior do que nao ter gate, porque da a impressao de cobertura.
+  # -------------------------------------------------------------------------
+  sonar:
+    name: SonarCloud
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # O Sonar usa o historico para atribuir issues a quem introduziu.
+          fetch-depth: 0
+
+      - name: Exigir SONAR_TOKEN
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          if [ -n "${SONAR_TOKEN:-}" ]; then
+            echo "SONAR_TOKEN presente."
+            exit 0
+          fi
+
+          echo "::error title=SONAR_TOKEN ausente::O gate do SonarCloud nao pode ser pulado."
+          {
+            echo ""
+            echo "SONAR_TOKEN nao esta configurado neste repositorio."
+            echo ""
+            echo "Este passo falha de proposito. Um gate de qualidade que fica verde"
+            echo "quando falta o token nao e um gate -- e um adesivo."
+            echo ""
+            echo "Para configurar (detalhes em SETUP.md, secao 4):"
+            echo "  1. https://sonarcloud.io -> Analyze new project -> este repositorio"
+            echo "  2. Administration -> Analysis Method -> desligue 'Automatic Analysis'"
+            echo "  3. My Account -> Security -> Generate Token"
+            echo "  4. gh secret set SONAR_TOKEN --body '<token>'"
+            echo "  5. Confira sonar.projectKey e sonar.organization em sonar-project.properties"
+            echo ""
+          } >&2
+          exit 1
+
+      - name: SonarCloud scan
+        uses: SonarSource/sonarqube-scan-action@v5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: https://sonarcloud.io
+
+  # -------------------------------------------------------------------------
+  # Sincronia com a main
+  #
+  # A branch nao pode estar ATRAS da main. Sem isso os gates aprovam um codigo
+  # que nunca foi testado junto com o que ja esta na main.
+  #
+  # Este gate tem um segundo papel no modelo: quando um PR conflitante e
+  # mergeado, e ele que fica vermelho e diz, para quem ficou de fora do
+  # ambiente, que chegou a hora de rebasear e resolver o conflito UMA vez --
+  # contra codigo real e ja mergeado, e nao contra a branch especulativa de
+  # outra pessoa. Ver bloco 5 do DEMO.md.
+  # -------------------------------------------------------------------------
+  sync:
+    name: sincronia com a main
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Sem isso o checkout traria o merge commit sintetico do PR, que tem
+          # a main como ancestral por construcao -- o gate nunca reprovaria.
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: A branch esta atras da main?
+        run: |
+          git fetch --quiet origin main
+          if git merge-base --is-ancestor origin/main HEAD; then
+            echo "Em dia com a main ($(git rev-parse --short origin/main))."
+            exit 0
+          fi
+
+          behind=$(git rev-list --count HEAD..origin/main)
+          echo "::error title=Branch desatualizada::${behind} commit(s) da main nao estao nesta branch."
+          {
+            echo ""
+            echo "Esta branch esta ${behind} commit(s) atras de origin/main."
+            echo ""
+            echo "Os gates precisam rodar sobre o codigo desta feature JUNTO com o"
+            echo "que ja esta na main. Rode:"
+            echo ""
+            echo "  git fetch origin main"
+            echo "  git rebase origin/main"
+            echo "  git push --force-with-lease"
+            echo ""
+            echo "Se aparecer conflito nesse rebase, e agora que ele se resolve:"
+            echo "uma vez so, contra codigo que ja foi revisado e mergeado."
+            echo ""
+          } >&2
+          exit 1

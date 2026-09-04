@@ -22,15 +22,32 @@ ENV_URL="${ENV_URL:-}"
 
 BLOCKED_LABEL="blocked:$ENV_NAME"
 DEPLOY_LABEL="deploy:$ENV_NAME"
+REPO="${GH_REPO:-$(gh repo view --json nameWithOwner --jq .nameWithOwner)}"
 
 log() { printf '  %s\n' "$*" >&2; }
 
-run_gh() {
+# Label e comentario pela API REST, e nao pelos subcomandos de alto nivel do gh.
+#
+# `gh pr edit --add-label` e `gh pr comment` passam por GraphQL e exigem o escopo
+# read:org para resolver login/slug de autores e times -- escopo que nem um PAT
+# comum nem um token de instalacao de App precisam ter para fazer este trabalho.
+# REST faz o mesmo com a permissao que o App ja tem (Pull requests: write).
+add_label() {
+  if [ "$DRY_RUN" = "true" ]; then log "[dry-run] +$2 em #$1"; return 0; fi
+  gh api -X POST "repos/$REPO/issues/$1/labels" -f "labels[]=$2" --silent
+}
+
+remove_label() {
+  if [ "$DRY_RUN" = "true" ]; then log "[dry-run] -$2 em #$1"; return 0; fi
+  gh api -X DELETE "repos/$REPO/issues/$1/labels/$2" --silent 2>/dev/null || true
+}
+
+post_comment() {
   if [ "$DRY_RUN" = "true" ]; then
-    log "[dry-run] gh $*"
-  else
-    gh "$@"
+    printf '\n----- comentario para #%s -----\n%s\n-----\n' "$1" "$2" >&2
+    return 0
   fi
+  gh api -X POST "repos/$REPO/issues/$1/comments" -f body="$2" --silent
 }
 
 # Uma unica chamada para saber quem carrega a marca hoje.
@@ -114,12 +131,8 @@ BODY_EOF
 )"
 
   log "#$pr entrou em conflito -> comenta + marca"
-  if [ "$DRY_RUN" = "true" ]; then
-    printf '\n----- comentario para #%s -----\n%s\n-----\n' "$pr" "$BODY" >&2
-  else
-    gh pr comment "$pr" --body "$BODY"
-  fi
-  run_gh pr edit "$pr" --add-label "$BLOCKED_LABEL"
+  post_comment "$pr" "$BODY"
+  add_label "$pr" "$BLOCKED_LABEL"
 done < <(jq -c '.excluded[]' "$STATE_FILE")
 
 # ---------------------------------------------------------------------------
@@ -147,12 +160,8 @@ BODY_EOF
 )"
 
   log "#$pr voltou ao conjunto -> comenta + desmarca"
-  if [ "$DRY_RUN" = "true" ]; then
-    printf '\n----- comentario para #%s -----\n%s\n-----\n' "$pr" "$BODY" >&2
-  else
-    gh pr comment "$pr" --body "$BODY"
-  fi
-  run_gh pr edit "$pr" --remove-label "$BLOCKED_LABEL"
+  post_comment "$pr" "$BODY"
+  remove_label "$pr" "$BLOCKED_LABEL"
 done < <(jq -c '.features[]' "$STATE_FILE")
 
 # ---------------------------------------------------------------------------
@@ -168,5 +177,5 @@ while read -r pr; do
     continue
   fi
   log "#$pr nao e mais candidato -> remove marca em silencio"
-  run_gh pr edit "$pr" --remove-label "$BLOCKED_LABEL"
+  remove_label "$pr" "$BLOCKED_LABEL"
 done < <(jq -r '.[]' <<<"$BLOCKED_NOW")

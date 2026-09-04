@@ -59,7 +59,8 @@ if [ "$RESET" = true ]; then
   for b in "${BRANCHES[@]}"; do
     pr="$(gh pr list --state open --head "$b" --json number --jq '.[0].number // empty')"
     if [ -n "$pr" ]; then
-      gh pr close "$pr" --delete-branch >/dev/null 2>&1 || gh pr close "$pr" >/dev/null
+      gh pr close "$pr" >/dev/null 2>&1 \
+        || gh api -X PATCH "repos/$REPO/pulls/$pr" -f state=closed --silent
       log "PR #$pr fechado ($b)"
     fi
     git push --quiet origin --delete "$b" >/dev/null 2>&1 && log "branch remota $b apagada" || true
@@ -86,15 +87,27 @@ insert_before() {
 
 open_pr() {
   local branch="$1" title="$2" body="$3"
-  shift 3
   git push --quiet --set-upstream origin "$branch"
-  local url
-  url="$(gh pr create --base main --head "$branch" --title "$title" --body "$body")"
-  log "PR aberto: $url"
-  if [ "$#" -gt 0 ]; then
-    gh pr edit "$branch" --add-label "$(IFS=,; echo "$*")" >/dev/null
-    log "labels: $*"
+  log "PR aberto: $(gh pr create --base main --head "$branch" --title "$title" --body "$body")"
+}
+
+# Labels pela API REST, nao por `gh pr edit --add-label`: o subcomando passa por
+# GraphQL e exige o escopo read:org, que um PAT comum nao tem. REST resolve com
+# o escopo repo. Idempotente -- aplicar duas vezes nao duplica nada.
+ensure_labels() {
+  local branch="$1"; shift
+  local pr
+  pr="$(gh pr list --state open --head "$branch" --json number --jq '.[0].number // empty')"
+  [ -n "$pr" ] || { log "sem PR aberto para $branch, nao rotulei"; return 0; }
+  if [ "$#" -eq 0 ]; then
+    log "PR #$pr sem label (de proposito)"
+    return 0
   fi
+  local args=()
+  local l
+  for l in "$@"; do args+=(-f "labels[]=$l"); done
+  gh api -X POST "repos/$REPO/issues/$pr/labels" "${args[@]}" --silent
+  log "PR #$pr labels: $*"
 }
 
 exists() {
@@ -107,7 +120,7 @@ exists() {
 # ---------------------------------------------------------------------------
 section "feat/a-user-endpoint"
 if exists feat/a-user-endpoint; then
-  log "ja existe com PR aberto, pulando (use --reset para recriar)"
+  log "ja existe com PR aberto, pulando a criacao (use --reset para recriar)"
 else
   git checkout --quiet -B feat/a-user-endpoint origin/main
 
@@ -152,16 +165,16 @@ EOF
     "feat(users): endpoint GET /users" \
     "Adiciona \`GET /users\` e registra a rota no bloco de features de \`src/routes/index.ts\`.
 
-Marcada com \`deploy:dev\`." \
-    "deploy:dev"
+Marcada com \`deploy:dev\`."
 fi
+ensure_labels feat/a-user-endpoint deploy:dev
 
 # ---------------------------------------------------------------------------
 # feat/b-auth-endpoint -- MESMO bloco que A, de proposito
 # ---------------------------------------------------------------------------
 section "feat/b-auth-endpoint"
 if exists feat/b-auth-endpoint; then
-  log "ja existe com PR aberto, pulando (use --reset para recriar)"
+  log "ja existe com PR aberto, pulando a criacao (use --reset para recriar)"
 else
   git checkout --quiet -B feat/b-auth-endpoint origin/main
 
@@ -205,13 +218,14 @@ EOF
 Registra no **mesmo ponto** que #1 — as duas branches conflitam. Sem label no seed:
 a label \`deploy:hom\` e aplicada ao vivo no bloco 3 da demo."
 fi
+ensure_labels feat/b-auth-endpoint
 
 # ---------------------------------------------------------------------------
 # feat/c-metrics-endpoint -- outra regiao do mesmo arquivo
 # ---------------------------------------------------------------------------
 section "feat/c-metrics-endpoint"
 if exists feat/c-metrics-endpoint; then
-  log "ja existe com PR aberto, pulando (use --reset para recriar)"
+  log "ja existe com PR aberto, pulando a criacao (use --reset para recriar)"
 else
   git checkout --quiet -B feat/c-metrics-endpoint origin/main
 
@@ -258,9 +272,9 @@ EOF
     "Adiciona \`GET /metrics\` e registra no bloco de observabilidade de \`src/routes/index.ts\`.
 
 Mesmo arquivo que #1 e #2, **outra regiao**: nao conflita com ninguem.
-Marcada com \`deploy:dev\`." \
-    "deploy:dev"
+Marcada com \`deploy:dev\`."
 fi
+ensure_labels feat/c-metrics-endpoint deploy:dev
 
 git checkout --quiet "$ORIGINAL_BRANCH"
 

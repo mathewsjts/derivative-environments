@@ -1,0 +1,271 @@
+# ---------------------------------------------------------------------------
+# rebuild-env.yml -- o coracao da POC.
+#
+# POR QUE EXISTE
+#
+# No modelo antigo, `dev` e `hom` sao branches de longa duracao que recebem
+# merge humano. Elas acumulam commits que nao existem em nenhum outro lugar,
+# viram fonte de cherry-pick e transformam cada feature em ate 3 PRs.
+#
+# Aqui elas deixam de ser branches e viram ARTEFATOS DERIVADOS: a cada gatilho,
+# o job joga fora o que estava la e remonta do zero a partir da main de agora,
+# reaplicando os PRs abertos que carregam a label deploy:<env>.
+#
+#   dev = main + (todo PR aberto com deploy:dev que mergeia limpo)
+#   hom = main + (todo PR aberto com deploy:hom que mergeia limpo)
+#
+# Consequencias que valem dizer em voz alta:
+#   - Ninguem faz merge em dev/hom. Quem faz push e este job.
+#   - Deploy continua sendo push na branch de ambiente. Muda quem empurra.
+#   - Conflito nao trava o ambiente: a branch conflitante fica de fora, o resto
+#     sobe, e o PR dela recebe um comentario. O loop nao para.
+#   - Rodar duas vezes seguidas sem mudanca produz o mesmo SHA e nao publica
+#     nada (ver o passe 2 em .github/scripts/assemble-env.sh).
+# ---------------------------------------------------------------------------
+name: rebuild-env
+
+on:
+  push:
+    # dev e hom sao SAIDA deste job, nunca entrada -- ignorar as duas evita o
+    # laco infinito. A main NAO esta na lista de proposito: mergear na main e
+    # justamente o que precisa redisparar a reconstrucao dos dois ambientes.
+    branches-ignore: [dev, hom]
+
+  pull_request:
+    # labeled/unlabeled  -> entrou ou saiu de um conjunto
+    # closed             -> saiu do conjunto (mergeado ou nao)
+    # reopened           -> pode voltar ao conjunto
+    types: [labeled, unlabeled, closed, reopened]
+
+  # O gatilho mais usado ao vivo. Se algo travar durante a apresentacao, este e
+  # o botao: Actions -> rebuild-env -> Run workflow.
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Qual ambiente reconstruir
+        type: choice
+        options: [ambos, dev, hom]
+        default: ambos
+      max_set:
+        description: "Sobrescreve o teto do conjunto (vazio = padrao: dev 10, hom 5)"
+        required: false
+        default: ""
+
+# O GITHUB_TOKEN so precisa ler. Escrita (push na branch de ambiente, comentario
+# e label no PR) sai do token do GitHub App -- ver o passo "Token do GitHub App".
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  rebuild:
+    name: reconstruir ${{ matrix.env }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      # Um ambiente com problema nao pode impedir o outro de ser publicado --
+      # e a mesma regra que aplicamos as branches dentro de um conjunto.
+      fail-fast: false
+      matrix:
+        include:
+          - env: dev
+            max: 10
+            urlKey: VERCEL_URL_DEV
+          - env: hom
+            max: 5
+            urlKey: VERCEL_URL_HOM
+
+    # Por ambiente, nao global: reconstruir dev nao tem por que esperar hom.
+    # cancel-in-progress porque uma reconstrucao e sempre "do zero a partir da
+    # main de agora" -- a execucao mais nova torna a anterior irrelevante.
+    concurrency:
+      group: rebuild-${{ matrix.env }}
+      cancel-in-progress: true
+
+    env:
+      ENV_NAME: ${{ matrix.env }}
+      MAX_SET: ${{ github.event.inputs.max_set != '' && github.event.inputs.max_set || matrix.max }}
+      STATE_FILE: ${{ github.workspace }}/../rebuild-state-${{ matrix.env }}.json
+      ENV_URL: ${{ vars[matrix.urlKey] }}
+
+    steps:
+      # ---------------------------------------------------------------------
+      # Por que nao o GITHUB_TOKEN padrao?
+      #
+      # Push feito com o GITHUB_TOKEN NAO dispara workflows (protecao do GitHub
+      # contra recursao). Como o deploy neste modelo e disparado por push na
+      # branch de ambiente, usar o GITHUB_TOKEN faria o push funcionar e o
+      # deploy simplesmente nao acontecer -- sem erro, sem log, sem aviso.
+      # A falha e silenciosa, que e a pior especie.
+      #
+      # O workflow fake-deploy.yml existe para provar isso ao vivo.
+      # ---------------------------------------------------------------------
+      - name: Exigir credenciais do GitHub App
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "${APP_ID:-}" ] && [ -n "${APP_PRIVATE_KEY:-}" ]; then
+            echo "Credenciais do App presentes."
+            exit 0
+          fi
+          echo "::error title=GitHub App nao configurado::APP_ID e/ou APP_PRIVATE_KEY ausentes."
+          {
+            echo ""
+            echo "Este job nao pode cair para o GITHUB_TOKEN padrao."
+            echo ""
+            echo "Push feito com GITHUB_TOKEN nao dispara workflows. O push"
+            echo "aconteceria, a branch de ambiente atualizaria, e o deploy"
+            echo "nunca rodaria -- sem nenhuma mensagem de erro."
+            echo ""
+            echo "Configure conforme SETUP.md, secao 1."
+            echo ""
+          } >&2
+          exit 1
+
+      - name: Token do GitHub App
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      # ---------------------------------------------------------------------
+      # Filtro barato: push numa branch que nao esta em nenhum conjunto deste
+      # ambiente nao muda o resultado da montagem. Continua stateless -- so
+      # pergunta ao GitHub se a branch importa para ESTE ambiente.
+      # ---------------------------------------------------------------------
+      - name: Este evento afeta ${{ matrix.env }}?
+        id: guard
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          SELECTED: ${{ github.event.inputs.environment || 'ambos' }}
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
+             && [ "$SELECTED" != "ambos" ] && [ "$SELECTED" != "$ENV_NAME" ]; then
+            echo "Disparo manual pediu '$SELECTED'. Pulando $ENV_NAME."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            echo "Push na main: a base mudou, os dois ambientes remontam."
+            echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          n=$(gh pr list --state open --base main --head "${{ github.ref_name }}" \
+                --label "deploy:$ENV_NAME" --json number --jq 'length')
+          if [ "$n" -gt 0 ]; then
+            echo "Branch esta no conjunto de $ENV_NAME."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Branch nao esta no conjunto de $ENV_NAME. Nada a fazer."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.guard.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          # Historico completo: a montagem faz merge de N branches.
+          fetch-depth: 0
+          # Credencial do App tambem no git, para que o push la embaixo saia
+          # como o App e dispare os workflows de deploy.
+          token: ${{ steps.app-token.outputs.token }}
+
+      # ---------------------------------------------------------------------
+      # A montagem. O script nao publica nada -- da para roda-lo no laptop para
+      # ensaiar (ver DEMO.md, "se der errado ao vivo").
+      # ---------------------------------------------------------------------
+      - name: Montar o conjunto de ${{ matrix.env }}
+        if: steps.guard.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+        run: ./.github/scripts/assemble-env.sh
+
+      - name: Resumo da montagem
+        if: steps.guard.outputs.run == 'true'
+        id: state
+        run: |
+          set -euo pipefail
+          echo "noop=$(jq -r '.noop' "$STATE_FILE")" >> "$GITHUB_OUTPUT"
+          echo "head=$(jq -r '.envHead' "$STATE_FILE")" >> "$GITHUB_OUTPUT"
+          echo "lease=$(jq -r '.remoteHead // ""' "$STATE_FILE")" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## \`${ENV_NAME}\` = $(jq -r '[.base.branch] + [.features[].branch] | join(" + ")' "$STATE_FILE")"
+            echo ""
+            echo "| | PR | branch | autor |"
+            echo "|---|---|---|---|"
+            jq -r '.features[] | "| ✅ | #\(.pr) | `\(.branch)` | @\(.author) |"' "$STATE_FILE"
+            jq -r '.excluded[] | "| ⛔ | #\(.pr) | `\(.branch)` | @\(.author) |"' "$STATE_FILE"
+            echo ""
+            echo "- base \`main\` = \`$(jq -r '.base.sha' "$STATE_FILE")\`"
+            echo "- HEAD de \`${ENV_NAME}\` = \`$(jq -r '.envHead' "$STATE_FILE")\`"
+            echo "- no-op (conjunto identico ao que ja esta publicado): \`$(jq -r '.noop' "$STATE_FILE")\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ---------------------------------------------------------------------
+      # Gate antes de publicar. Se o CONJUNTO montado nao builda, o ambiente
+      # anterior continua no ar -- publicar um conjunto quebrado seria pior do
+      # que ficar um ciclo desatualizado.
+      # ---------------------------------------------------------------------
+      - name: docker build do conjunto montado
+        if: steps.guard.outputs.run == 'true' && steps.state.outputs.noop != 'true'
+        run: |
+          start=$(date +%s)
+          docker build --no-cache -t "derivative-environments:${ENV_NAME}" .
+          echo "docker build levou $(( $(date +%s) - start ))s"
+
+      # ---------------------------------------------------------------------
+      # Publicacao.
+      #
+      # --force-with-lease com o SHA esperado explicito: se alguem (ou outra
+      # execucao) mexeu na branch depois da nossa leitura, o push falha em vez
+      # de sobrescrever. --force puro nunca.
+      #
+      # E o push que dispara o deploy -- feito pelo App, portanto dispara
+      # tambem os workflows (fake-deploy.yml).
+      # ---------------------------------------------------------------------
+      - name: Publicar ${{ matrix.env }}
+        if: steps.guard.outputs.run == 'true' && steps.state.outputs.noop != 'true'
+        run: |
+          set -euo pipefail
+          lease="${{ steps.state.outputs.lease }}"
+          if [ -z "$lease" ]; then
+            echo "Branch $ENV_NAME ainda nao existe no remoto: push simples."
+            git push origin "HEAD:refs/heads/$ENV_NAME"
+          else
+            git push --force-with-lease="refs/heads/$ENV_NAME:$lease" \
+                     origin "HEAD:refs/heads/$ENV_NAME"
+          fi
+
+      - name: Nada mudou
+        if: steps.guard.outputs.run == 'true' && steps.state.outputs.noop == 'true'
+        run: |
+          echo "O conjunto montado tem o mesmo SHA que ja esta publicado em $ENV_NAME."
+          echo "Sem docker build, sem push, sem redeploy. Idempotencia de verdade,"
+          echo "nao 'resultado parecido'."
+
+      # ---------------------------------------------------------------------
+      # Notificacao SEMPRE que o job rodou -- inclusive no no-op.
+      #
+      # Nao e detalhe: um PR pode entrar em conflito sem que o conjunto
+      # publicado mude (o ambiente ja tinha exatamente as mesmas features). O
+      # ambiente e no-op, mas o autor do PR precisa do comentario.
+      # ---------------------------------------------------------------------
+      - name: Notificar os PRs afetados
+        if: steps.guard.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+        run: ./.github/scripts/notify.sh

@@ -1,0 +1,6 @@
+{
+  "environment": "main",
+  "base": { "branch": "main", "sha": "" },
+  "features": [],
+  "excluded": []
+}

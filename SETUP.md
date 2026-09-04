@@ -250,6 +250,11 @@ buildar o Dockerfile.
 > A pasta `public/` fica vazia porque o filesystem é consultado **antes** dos
 > rewrites: um `index.html` ali passaria a responder `GET /` no lugar da API, e
 > é justamente `/` que o bloco 1 do DEMO.md abre no browser.
+>
+> **Não coloque comentários no `vercel.json`.** O schema da Vercel é estrito e
+> rejeita qualquer propriedade que não conheça — inclusive a convenção `"//"`
+> usada para comentar JSON. O erro é
+> `schema validation failed ... should NOT have additional property "//"`.
 
 Depois do primeiro deploy:
 

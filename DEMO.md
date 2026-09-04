@@ -23,6 +23,10 @@
 
 ## 0. Preparação — T-10 min
 
+> **Pré-requisito:** [SETUP.md](SETUP.md) inteiro concluído. Sem o GitHub App
+> (§1) o `rebuild-env` falha de propósito e as branches `dev`/`hom` nem chegam a
+> existir — não há o que mostrar na Vercel.
+
 ```bash
 ./.github/scripts/test-assemble.sh    # 29 verificações offline, ~5s
 ./scripts/seed-demo.sh                # 3 PRs + primeira reconstrução

@@ -15,9 +15,13 @@
 #   exit 2   : teto do conjunto estourado -- nao montou nada
 #
 # Propriedades que o job depende:
-#   - Idempotente: sempre reconstroi do zero a partir de origin/main.
-#   - Stateless: nao le nada da branch de ambiente anterior.
-#   - Deterministico: mesmo conjunto de entrada => mesmo SHA de saida.
+#   - Idempotente: sempre reconstroi do zero a partir de origin/main. Se o
+#     conjunto montado for igual ao publicado, nao republica nada.
+#   - Deterministico: as merge commits sao funcao pura das entradas (datas e
+#     identidade pinadas), entao o mesmo conjunto sempre gera a mesma historia.
+#   - O conteudo do ambiente anterior NUNCA entra no build. O unico dado lido
+#     da branch de ambiente e o manifesto, e so para responder "o conjunto
+#     mudou?" -- ver a secao 6.
 set -euo pipefail
 
 ENV_NAME="${ENV_NAME:?defina ENV_NAME (dev|hom)}"
@@ -207,21 +211,72 @@ while read -r inc; do
 done < <(jq -c '.[]' <<<"$INCLUDED")
 
 # ---------------------------------------------------------------------------
-# 6. Manifesto: o que o /version vai responder. Chaves ordenadas e zero
-#    timestamp/run-id la dentro, senao a determinismo do SHA cai por terra.
+# 6. O conjunto montado ja e o que esta publicado?
+#
+#    A comparacao e pelo CONJUNTO (base, features, excluded), lido do manifesto
+#    da branch de ambiente, e nao pelo SHA. O motivo e uma armadilha real:
+#
+#    A montagem e deterministica, entao voltar a um conjunto ja publicado
+#    reproduz o commit byte a byte. Um provedor que deduplica deploy por SHA do
+#    commit -- a Vercel faz isso -- ignora esse push e NAO move o alias da
+#    branch. Resultado: a branch anda, a URL fica parada num conjunto antigo,
+#    sem erro em lugar nenhum.
+#
+#    Comparando conjunto, "nada mudou" continua sendo no-op de verdade (nao
+#    republica, o SHA na branch nao muda), e "voltei a um conjunto anterior"
+#    vira uma publicacao nova -- que e o que de fato aconteceu.
 # ---------------------------------------------------------------------------
-jq -S -n --arg env "$ENV_NAME" --arg base "$BASE_SHA" \
-      --argjson features "$INCLUDED" --argjson excluded "$EXCLUDED" \
-  '{environment:$env, base:{branch:"main", sha:$base}, features:$features, excluded:$excluded}' \
-  > build-manifest.json
+section "[$ENV_NAME] comparando com o publicado"
 
-git add build-manifest.json
-git commit --quiet -m "chore(env): manifesto de $ENV_NAME"
-
-ENV_HEAD="$(git rev-parse HEAD)"
 REMOTE_HEAD="$(git ls-remote origin "refs/heads/$ENV_NAME" | cut -f1)"
+
+# Traz a branch de ambiente so para ler o manifesto dela. Continuamos montando
+# do zero a partir da main -- nada do conteudo anterior entra no build.
+PUBLISHED='{}'
+if [ -n "$REMOTE_HEAD" ]; then
+  git fetch --quiet origin "+refs/heads/$ENV_NAME:refs/remotes/origin/$ENV_NAME" 2>/dev/null || true
+  PUBLISHED="$(git show "origin/$ENV_NAME:build-manifest.json" 2>/dev/null || echo '{}')"
+fi
+
+descriptor() { jq -S -c '{environment, base, features, excluded}' 2>/dev/null || echo 'null'; }
+
+NEW_DESC="$(jq -S -c -n --arg env "$ENV_NAME" --arg base "$BASE_SHA" \
+              --argjson features "$INCLUDED" --argjson excluded "$EXCLUDED" \
+  '{environment:$env, base:{branch:"main", sha:$base}, features:$features, excluded:$excluded}')"
+PUB_DESC="$(printf '%s' "$PUBLISHED" | descriptor)"
+
 NOOP=false
-if [ -n "$REMOTE_HEAD" ] && [ "$ENV_HEAD" = "$REMOTE_HEAD" ]; then NOOP=true; fi
+if [ -n "$REMOTE_HEAD" ] && [ "$NEW_DESC" = "$PUB_DESC" ]; then
+  NOOP=true
+fi
+
+if [ "$NOOP" = true ]; then
+  # Sem commit de manifesto: o ambiente publicado ja e este. A branch remota
+  # fica exatamente onde esta, com o mesmo SHA.
+  ENV_HEAD="$REMOTE_HEAD"
+  log "conjunto identico ao publicado -- nada a fazer"
+else
+  # ---------------------------------------------------------------------------
+  # 7. Manifesto: o que o /version vai responder.
+  #
+  #    previousEnvHead registra o SHA que este ambiente substituiu. Alem de
+  #    deixar a branch auto-descritiva, e o que garante que uma transicao de
+  #    volta a um conjunto anterior produza um commit inedito.
+  #
+  #    Chaves ordenadas e zero timestamp/run-id aqui dentro: a montagem precisa
+  #    continuar sendo funcao pura das entradas.
+  # ---------------------------------------------------------------------------
+  jq -S -n --arg env "$ENV_NAME" --arg base "$BASE_SHA" --arg prev "$REMOTE_HEAD" \
+        --argjson features "$INCLUDED" --argjson excluded "$EXCLUDED" \
+    '{environment:$env, base:{branch:"main", sha:$base},
+      previousEnvHead:(if $prev == "" then null else $prev end),
+      features:$features, excluded:$excluded}' \
+    > build-manifest.json
+
+  git add build-manifest.json
+  git commit --quiet -m "chore(env): manifesto de $ENV_NAME"
+  ENV_HEAD="$(git rev-parse HEAD)"
+fi
 
 log "HEAD de $ENV_NAME = $ENV_HEAD"
 log "remoto           = ${REMOTE_HEAD:-<nao existe>}"

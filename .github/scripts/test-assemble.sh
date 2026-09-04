@@ -221,5 +221,69 @@ check "as tres rotas estao no ar" \
   "$(git show hom:src/routes/index.ts | grep -cE "usersRouter|authRouter|metricsRouter")" "6"
 
 echo
+echo "== ciclo de estados: voltar a um conjunto ja publicado gera SHA inedito =="
+#
+# Regressao do bug que congelou a URL de dev na demo: a montagem e
+# deterministica, entao republicar um conjunto anterior reproduzia o commit byte
+# a byte. A Vercel deduplica deploy por SHA, ignorava o push e nao movia o alias
+# da branch -- a branch andava, a URL ficava parada, sem erro nenhum.
+#
+# Este bloco PUBLICA de verdade (push no remoto local), que e o que faltava para
+# o bug aparecer no harness.
+publish() {
+  local state="$1" cands="$2"
+  ENV_NAME=hom MAX_SET=5 STATE_FILE="$state" CANDIDATES_JSON="$cands" \
+    bash "$REPO_ROOT/.github/scripts/assemble-env.sh" >/dev/null 2>&1
+  if [ "$(jq -r '.noop' "$state")" = "true" ]; then return 0; fi
+  local lease
+  lease="$(jq -r '.remoteHead // ""' "$state")"
+  if [ -z "$lease" ]; then
+    git push --quiet origin "HEAD:refs/heads/hom"
+  else
+    git push --quiet --force-with-lease="refs/heads/hom:$lease" origin "HEAD:refs/heads/hom"
+  fi
+}
+
+ONLY_B_SET='[{"pr":2,"branch":"feat/b-auth-endpoint","author":"grace"}]'
+B_AND_C_SET='[{"pr":2,"branch":"feat/b-auth-endpoint","author":"grace"},
+               {"pr":3,"branch":"feat/c-metrics-endpoint","author":"linus"}]'
+
+git checkout --quiet main
+publish "$WORK/cycle1.json" "$ONLY_B_SET"
+CYCLE1="$(jq -r '.envHead' "$WORK/cycle1.json")"
+check "primeira publicacao registra previousEnvHead nulo" \
+  "$(git show hom:build-manifest.json | jq -r '.previousEnvHead')" "null"
+
+git checkout --quiet main
+publish "$WORK/cycle2.json" "$ONLY_B_SET"
+check "mesmo conjunto de novo: no-op" \
+  "$(jq -r '.noop' "$WORK/cycle2.json")" "true"
+check "no-op nao mexe no SHA publicado" \
+  "$(jq -r '.envHead' "$WORK/cycle2.json")" "$CYCLE1"
+check "o remoto continua exatamente onde estava" \
+  "$(git ls-remote origin refs/heads/hom | cut -f1)" "$CYCLE1"
+
+git checkout --quiet main
+publish "$WORK/cycle3.json" "$B_AND_C_SET"
+CYCLE3="$(jq -r '.envHead' "$WORK/cycle3.json")"
+check "conjunto diferente publica" \
+  "$([ "$CYCLE3" != "$CYCLE1" ] && echo sim || echo nao)" "sim"
+check "previousEnvHead aponta para a publicacao anterior" \
+  "$(git show hom:build-manifest.json | jq -r '.previousEnvHead')" "$CYCLE1"
+
+git checkout --quiet main
+publish "$WORK/cycle4.json" "$ONLY_B_SET"
+CYCLE4="$(jq -r '.envHead' "$WORK/cycle4.json")"
+check "voltar ao conjunto inicial NAO e no-op" \
+  "$(jq -r '.noop' "$WORK/cycle4.json")" "false"
+check "e produz SHA diferente do da primeira vez (o bug)" \
+  "$([ "$CYCLE4" != "$CYCLE1" ] && echo sim || echo nao)" "sim"
+check "o conjunto publicado e o mesmo de antes, ainda assim" \
+  "$(git show hom:build-manifest.json | jq -r '[.base.branch] + [.features[].branch] | join(" + ")')" \
+  "main + feat/b-auth-endpoint"
+check "a historia de merges e identica (so o commit de manifesto muda)" \
+  "$(git rev-parse "${CYCLE4}~1")" "$(git rev-parse "${CYCLE1}~1")"
+
+echo
 printf '\033[1m%s ok, %s falha(s)\033[0m\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

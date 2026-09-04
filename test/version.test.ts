@@ -13,6 +13,7 @@ describe('GET /version', () => {
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty('environment');
     expect(res.body).toHaveProperty('base.branch');
+    expect(res.body).toHaveProperty('previousEnvHead');
     expect(res.body).toHaveProperty('summary');
     expect(Array.isArray(res.body.features)).toBe(true);
     expect(Array.isArray(res.body.excluded)).toBe(true);
@@ -31,6 +32,7 @@ describe('summarize', () => {
     const manifest: BuildManifest = {
       environment: 'hom',
       base: { branch: 'main', sha: 'abc1234' },
+      previousEnvHead: 'deadbee',
       features: [
         { pr: 1, branch: 'feat/a-user-endpoint', sha: 'aaa', author: 'x' },
         { pr: 3, branch: 'feat/c-metrics-endpoint', sha: 'ccc', author: 'y' },
@@ -48,6 +50,7 @@ describe('summarize', () => {
       summarize({
         environment: 'dev',
         base: { branch: 'main', sha: 'abc' },
+        previousEnvHead: null,
         features: [],
         excluded: [],
       }),

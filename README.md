@@ -112,6 +112,13 @@ O job reproduz em pares (`main + X`, depois `main + F + X` para cada F já no
 conjunto) e reporta o primeiro que conflita. É barato e acerta o PR certo — que
 importa, porque o comentário manda a pessoa esperar um PR específico.
 
+**A lógica de derivação vem da `main`, não do ref que disparou o job.** Em
+evento `pull_request`, o `actions/checkout` traz o merge ref do PR — a cópia dos
+scripts que está na branch da feature. Montar o ambiente com ela deixaria
+"derivado da `main`" meia verdade, e faria uma branch atrasada (ou um PR não
+revisado) mudar como *todos* os ambientes são montados. O job carrega
+`assemble-env.sh` e `notify.sh` de `origin/main` antes de rodar.
+
 **O ambiente anterior não entra no build.** O job lê exatamente duas coisas da
 branch de ambiente: o SHA (para o `--force-with-lease`) e o manifesto (para
 responder "o conjunto mudou?"). Nenhum byte do conteúdo anterior sobrevive — a

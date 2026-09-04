@@ -182,6 +182,40 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
 
       # ---------------------------------------------------------------------
+      # A logica de derivacao vem SEMPRE da main, nunca do ref que disparou.
+      #
+      # Em evento `pull_request` o actions/checkout traz o merge ref do PR --
+      # ou seja, a copia que esta na branch da feature. Usa-la para montar o
+      # ambiente esta errado por dois motivos:
+      #
+      #   1. Principio: o ambiente e derivado da main. A logica de derivacao
+      #      tambem tem que ser a da main, senao "derivado da main" e so meia
+      #      verdade.
+      #   2. Pratica: uma branch atrasada carrega a versao velha do script.
+      #      Ja aconteceu -- o script antigo escreveu um manifesto no formato
+      #      antigo por cima do codigo novo da main, e o `docker build` reprovou
+      #      o conjunto (corretamente, sem publicar).
+      #
+      # Efeito colateral bom: um PR nao consegue mudar como os ambientes sao
+      # montados. Para mudar a derivacao, e preciso passar pela main.
+      # ---------------------------------------------------------------------
+      - name: Carregar a logica de derivacao da main
+        id: derive
+        if: steps.guard.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin main
+          dir="$RUNNER_TEMP/derive"
+          mkdir -p "$dir"
+          for script in assemble-env.sh notify.sh; do
+            git show "origin/main:.github/scripts/$script" > "$dir/$script"
+            chmod +x "$dir/$script"
+          done
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          echo "Derivando com os scripts de origin/main ($(git rev-parse --short origin/main))."
+          echo "Ref que disparou: ${{ github.ref_name }} @ ${{ github.sha }}"
+
+      # ---------------------------------------------------------------------
       # A montagem. O script nao publica nada -- da para roda-lo no laptop para
       # ensaiar (ver DEMO.md, "se der errado ao vivo").
       # ---------------------------------------------------------------------
@@ -190,7 +224,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
-        run: ./.github/scripts/assemble-env.sh
+        run: ${{ steps.derive.outputs.dir }}/assemble-env.sh
 
       - name: Resumo da montagem
         if: steps.guard.outputs.run == 'true'
@@ -268,4 +302,4 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
-        run: ./.github/scripts/notify.sh
+        run: ${{ steps.derive.outputs.dir }}/notify.sh

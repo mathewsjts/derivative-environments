@@ -221,7 +221,10 @@ continua em silêncio.
 `main` agora. B continua fora — e **não recebeu comentário**, porque o estado
 dela não mudou.
 
-**Mostrar:** o PR #2 de B, com o job `sincronia com a main` **vermelho**.
+**Mostrar:** o PR #2 de B, agora marcado como **out-of-date** pelo GitHub — o
+merge está bloqueado porque a `main` andou. (O job `sincronia com a main` diz a
+mesma coisa com uma mensagem explicando o rebase, mas ele só re-executa no
+próximo push da branch; quem percebe a `main` andando é a regra do ruleset.)
 
 > Agora o gate diz para B o que fazer, e a diferença é toda: o conflito de B
 > não é mais contra a branch especulativa de alguém. É contra código real,

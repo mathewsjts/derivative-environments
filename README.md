@@ -112,12 +112,20 @@ O job reproduz em pares (`main + X`, depois `main + F + X` para cada F já no
 conjunto) e reporta o primeiro que conflita. É barato e acerta o PR certo — que
 importa, porque o comentário manda a pessoa esperar um PR específico.
 
-**A lógica de derivação vem da `main`, não do ref que disparou o job.** Em
-evento `pull_request`, o `actions/checkout` traz o merge ref do PR — a cópia dos
-scripts que está na branch da feature. Montar o ambiente com ela deixaria
-"derivado da `main`" meia verdade, e faria uma branch atrasada (ou um PR não
-revisado) mudar como *todos* os ambientes são montados. O job carrega
-`assemble-env.sh` e `notify.sh` de `origin/main` antes de rodar.
+**A lógica de derivação vem da `main`, não do ref que disparou o job** — em duas
+camadas, porque o GitHub tem dois lugares onde a procedência escorrega:
+
+- O `rebuild-env` usa `pull_request_target`, não `pull_request`. Com
+  `pull_request`, o GitHub executa a **definição do workflow que veio na branch
+  da feature**; com `pull_request_target`, a da branch base.
+- Depois do checkout, o job carrega `assemble-env.sh` e `notify.sh` de
+  `origin/main` — porque em evento de `push` numa branch de feature o checkout
+  é a própria branch.
+
+Sem as duas, "derivado da `main`" é meia verdade: uma branch atrasada monta o
+ambiente com a lógica dela, e um PR não revisado poderia mudar como *todos* os
+ambientes são montados. O limite de confiança do modelo é a label `deploy:<env>`,
+que só quem tem permissão de escrita aplica.
 
 **O ambiente anterior não entra no build.** O job lê exatamente duas coisas da
 branch de ambiente: o SHA (para o `--force-with-lease`) e o manifesto (para

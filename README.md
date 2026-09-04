@@ -143,6 +143,16 @@ conflitar. Ele atualiza com o *Update branch* nativo (merge, sem force-push) e,
 em conflito, **pula e segue** — resolver conflito contra a `main` é trabalho
 humano, feito uma vez, no PR.
 
+**Quem decide se há trabalho fica fora da fila de concorrência.** O
+`rebuild-env` usa `cancel-in-progress` por ambiente — uma reconstrução parte
+sempre da `main` de agora, então a execução mais nova torna a anterior
+irrelevante. Isso só é verdade entre execuções que vão *de fato* reconstruir.
+Enquanto a decisão morava dentro do job, um evento irrelevante reivindicava o
+grupo, cancelava quem estava trabalhando e só então descobria que não tinha nada
+a fazer — e os ambientes ficavam parados numa base antiga, com todos os
+workflows verdes. A decisão virou um job próprio, sem grupo, que emite a matriz
+do job seguinte: lista vazia, nenhum job.
+
 **A notificação usa label como estado.** `blocked:<env>` é a única memória do
 sistema. Sem ela, um job que roda a cada push transformaria um conflito de meio
 dia em quarenta comentários.

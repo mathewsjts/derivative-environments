@@ -1,0 +1,196 @@
+# ---------------------------------------------------------------------------
+# sync-prs.yml
+#
+# POR QUE EXISTE
+#
+# Quando a main anda, todo PR aberto fica desatualizado. Isso NAO impede a
+# branch de entrar em dev/hom -- a montagem sempre parte de origin/main e faz
+# merge da branch, entao uma branch atrasada entra normalmente enquanto nao
+# conflitar. O problema e outro, e e triplo:
+#
+#   1. Com `strict` ligado no ruleset da main, PR desatualizado nao mergeia.
+#      Sem automacao, cada push na main vira uma rodada de rebase manual.
+#   2. Os gates do PR (tsc, docker, Sonar) rodam sobre a arvore do PR. Branch
+#      atrasada e validada contra uma main que nao existe mais -- que e
+#      exatamente o "o Sonar reprova depois do merge" que este modelo ataca.
+#   3. Quanto mais a branch atrasa, maior a chance de ela conflitar com a main
+#      e ai sim ser excluida do ambiente.
+#
+# O QUE ELE FAZ
+#
+# A cada push na main, atualiza cada PR aberto com o "Update branch" nativo do
+# GitHub (merge da main na branch). Nao rebaseia e nao faz force-push: quem
+# tiver a branch localmente continua conseguindo dar `git pull`.
+#
+# O QUE ELE NAO FAZ
+#
+# Nao resolve conflito. Se o merge da main na branch conflitar, ele PULA e
+# segue para o proximo PR -- mesma regra do rebuild-env. Resolucao de conflito
+# contra a main e trabalho humano, feito uma vez, no PR.
+#
+# Nao comenta. Um PR que conflita com a main ja mostra isso de tres formas: o
+# banner de out-of-date, o ruleset bloqueando o merge, e o job "sincronia com a
+# main" com a mensagem explicando o rebase. Comentar a cada push na main seria
+# ruido -- e nao existe marca de estado aqui para deduplicar, como a
+# blocked:<env> faz no rebuild-env.
+# ---------------------------------------------------------------------------
+name: sync-prs
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "So listar quem seria atualizado"
+        type: boolean
+        default: false
+      only_labeled:
+        description: "Atualizar so PRs com alguma label deploy:*"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+# Serializado: duas execucoes atualizando os mesmos PRs se atropelariam no
+# expected_head_sha. Aqui nao cancelamos a anterior -- ela pode estar no meio de
+# uma atualizacao que vale terminar.
+concurrency:
+  group: sync-prs
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: atualizar PRs abertos com a main
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Exigir credenciais do GitHub App
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "${APP_ID:-}" ] && [ -n "${APP_PRIVATE_KEY:-}" ]; then
+            echo "Credenciais do App presentes."
+            exit 0
+          fi
+          echo "::error title=GitHub App nao configurado::Ver SETUP.md, secao 1."
+          {
+            echo ""
+            echo "Com o GITHUB_TOKEN padrao a atualizacao ate aconteceria, mas o"
+            echo "push resultante nao dispararia workflow nenhum: os gates do PR"
+            echo "nao re-rodariam e o ambiente nao seria reconstruido."
+            echo ""
+          } >&2
+          exit 1
+
+      - name: Token do GitHub App
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Atualizar
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          ONLY_LABELED: ${{ github.event.inputs.only_labeled || 'false' }}
+        run: |
+          set -euo pipefail
+
+          UPDATED=0
+          CONFLICTED=0
+          SKIPPED=0
+
+          {
+            echo "## 🔄 sync-prs"
+            echo ""
+            echo "Base: \`main\` @ \`${GITHUB_SHA:0:7}\`"
+            if [ "$DRY_RUN" = "true" ]; then
+              echo ""
+              echo "> **dry-run**: nada foi atualizado."
+            fi
+            echo ""
+            echo "| | PR | branch | atraso |"
+            echo "|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          prs="$(gh pr list --state open --base main --limit 100 \
+                   --json number,headRefName,headRefOid,isDraft,labels \
+                   --jq '.[] | [.number, .headRefName, .headRefOid, (.isDraft|tostring),
+                                ([.labels[].name] | map(select(startswith("deploy:"))) | length | tostring)]
+                              | @tsv')"
+
+          if [ -z "$prs" ]; then
+            echo "Nenhum PR aberto para a main."
+            echo "| — | — | _nenhum PR aberto_ | — |" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          while IFS=$'\t' read -r pr branch sha draft deploy_labels; do
+            [ -n "${pr:-}" ] || continue
+
+            if [ "$draft" = "true" ]; then
+              echo "  pula   #${pr} ${branch} (draft)"
+              SKIPPED=$((SKIPPED + 1))
+              echo "| ⏸️ | #${pr} | \`${branch}\` | draft |" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+
+            if [ "$ONLY_LABELED" = "true" ] && [ "$deploy_labels" = "0" ]; then
+              echo "  pula   #${pr} ${branch} (sem label deploy:*)"
+              SKIPPED=$((SKIPPED + 1))
+              echo "| ⏸️ | #${pr} | \`${branch}\` | sem label |" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+
+            behind="$(gh api "repos/${GH_REPO}/compare/main...${branch}" --jq '.behind_by')"
+
+            if [ "$behind" -eq 0 ]; then
+              echo "  em dia #${pr} ${branch}"
+              echo "| ✅ | #${pr} | \`${branch}\` | em dia |" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "  seria atualizado #${pr} ${branch} (${behind} atras)"
+              echo "| 🔄 | #${pr} | \`${branch}\` | ${behind} atrás |" >> "$GITHUB_STEP_SUMMARY"
+              UPDATED=$((UPDATED + 1))
+              continue
+            fi
+
+            # expected_head_sha protege contra atropelar um push que aconteceu
+            # entre a listagem e agora -- o equivalente do --force-with-lease.
+            if gh api -X PUT "repos/${GH_REPO}/pulls/${pr}/update-branch" \
+                 -f expected_head_sha="$sha" --silent 2>/tmp/sync-err-${pr}.txt; then
+              echo "  ATUALIZA #${pr} ${branch} (${behind} atras)"
+              UPDATED=$((UPDATED + 1))
+              echo "| 🔄 | #${pr} | \`${branch}\` | ${behind} atrás → atualizado |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              # Conflito com a main. Nao resolvemos: e trabalho humano, feito uma
+              # vez, no PR. O loop segue -- um PR conflitante nao pode impedir os
+              # outros de serem atualizados.
+              echo "  CONFLITO #${pr} ${branch} -- deixado para o autor"
+              cat "/tmp/sync-err-${pr}.txt" >&2 || true
+              CONFLICTED=$((CONFLICTED + 1))
+              echo "| ⛔ | #${pr} | \`${branch}\` | ${behind} atrás → conflito |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done <<< "$prs"
+
+          {
+            echo ""
+            echo "**${UPDATED} atualizado(s), ${CONFLICTED} em conflito, ${SKIPPED} pulado(s).**"
+            if [ "$CONFLICTED" -gt 0 ]; then
+              echo ""
+              echo "> Os PRs em conflito precisam de rebase manual na \`main\` — uma vez,"
+              echo "> contra código já revisado e mergeado. O job não resolve conflito."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo ""
+          echo "${UPDATED} atualizado(s), ${CONFLICTED} em conflito, ${SKIPPED} pulado(s)."

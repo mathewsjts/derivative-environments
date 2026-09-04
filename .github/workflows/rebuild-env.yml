@@ -31,7 +31,32 @@ on:
     # justamente o que precisa redisparar a reconstrucao dos dois ambientes.
     branches-ignore: [dev, hom]
 
-  pull_request:
+  # pull_request_target, e nao pull_request. A diferenca nao e cosmetica:
+  #
+  #   pull_request        -> o GitHub executa a definicao do workflow que esta
+  #                          no MERGE REF DO PR, ou seja, a copia que veio na
+  #                          branch da feature.
+  #   pull_request_target -> executa a definicao que esta na BRANCH BASE (main).
+  #
+  # Com `pull_request`, uma branch atrasada monta o ambiente com a logica de
+  # derivacao dela, nao a da main. Ja quebrou: uma branch anterior a uma mudanca
+  # de formato do manifesto rodou o script velho contra o codigo novo da main, e
+  # o docker build reprovou o conjunto (corretamente, sem publicar).
+  #
+  # E o mesmo principio do passo "Carregar a logica de derivacao da main", uma
+  # camada acima: o ambiente e derivado da main, entao TUDO que decide como ele
+  # e montado -- workflow e scripts -- tem que vir da main.
+  #
+  # LIMITE DE CONFIANCA: pull_request_target roda com o contexto e os segredos
+  # da branch base. Aqui isso e aceitavel porque a logica de derivacao nunca vem
+  # do PR, e porque uma branch so entra no conjunto se alguem com permissao de
+  # escrita aplicar a label deploy:<env> -- a label E o limite de confianca. Num
+  # repositorio que aceita PR de fork, isso precisa ser uma decisao consciente:
+  # o `docker build` roda sobre a arvore montada, que inclui o codigo do PR.
+  #
+  # Efeito colateral bom: estes jobs deixam de aparecer como check do PR. O PR
+  # passa a mostrar so os gates, que e o que importa para quem revisa.
+  pull_request_target:
     # labeled/unlabeled  -> entrou ou saiu de um conjunto
     # closed             -> saiu do conjunto (mergeado ou nao)
     # reopened           -> pode voltar ao conjunto

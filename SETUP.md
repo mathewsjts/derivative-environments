@@ -174,7 +174,7 @@ gh api -X POST repos/<OWNER>/<REPO>/rulesets \
     {
       "type": "required_status_checks",
       "parameters": {
-        "strict_required_status_checks_policy": false,
+        "strict_required_status_checks_policy": true,
         "required_status_checks": [
           { "context": "typecheck / lint / testes" },
           { "context": "npm audit (producao)" },
@@ -189,10 +189,27 @@ gh api -X POST repos/<OWNER>/<REPO>/rulesets \
 JSON
 ```
 
-`strict_required_status_checks_policy` fica **desligado** de propósito: o job
-`sincronia com a main` já reprova branch desatualizada, com uma mensagem que
-explica o que fazer. A versão nativa do GitHub só enfileira o merge, sem dizer
-nada.
+**As duas camadas de sincronia são complementares, não redundantes.** O job
+`sincronia com a main` roda em evento de PR — ou seja, ele é um *retrato do
+momento do último push*. Quando a `main` anda depois disso, ele não re-executa e
+continua verde, mesmo com o PR já desatualizado. Quem enxerga isso
+continuamente é o `strict_required_status_checks_policy`, por isso ele fica
+**ligado**.
+
+A divisão fica assim:
+
+- **GitHub (`strict`)** — percebe que a `main` andou e bloqueia o merge.
+- **Job `sincronia com a main`** — quando roda, explica *o que fazer* e por quê,
+  em vez de só marcar o PR como out-of-date.
+
+Se você já criou o ruleset com `strict` desligado, ligue em
+**Settings → Rules → `main protegida` → Require branches to be up to date before
+merging**.
+
+> Ligar o `strict` sem automação transformaria cada push na `main` numa rodada
+> de rebase manual. O workflow `sync-prs.yml` cobre isso: a cada push na `main`
+> ele atualiza os PRs abertos com o *Update branch* nativo. Não precisa de
+> configuração nova — usa o mesmo GitHub App do passo 1.
 
 > **Na demo, com 1 approve exigido e só você na sala:** você não consegue aprovar
 > o próprio PR. Ou peça o approve a alguém antes de começar, ou faça o bloco 5

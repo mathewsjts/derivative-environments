@@ -49,11 +49,18 @@ log "origin/main = $BASE_SHA"
 #    quem abriu antes entra antes, e ninguem precisa negociar prioridade.
 # ---------------------------------------------------------------------------
 section "[$ENV_NAME] candidatos (label deploy:$ENV_NAME)"
-CANDIDATES="$(
-  gh pr list --state open --base main --label "deploy:$ENV_NAME" --limit 100 \
-    --json number,headRefName,headRefOid,author \
-    --jq '[.[] | {pr: .number, branch: .headRefName, author: .author.login}] | sort_by(.pr)'
-)"
+# CANDIDATES_JSON existe para teste: permite exercitar a montagem inteira sem
+# GitHub (ver .github/scripts/test-assemble.sh). Em producao vem do gh.
+if [ -n "${CANDIDATES_JSON:-}" ]; then
+  CANDIDATES="$(jq -c 'sort_by(.pr)' <<<"$CANDIDATES_JSON")"
+  log "usando CANDIDATES_JSON (modo teste)"
+else
+  CANDIDATES="$(
+    gh pr list --state open --base main --label "deploy:$ENV_NAME" --limit 100 \
+      --json number,headRefName,headRefOid,author \
+      --jq '[.[] | {pr: .number, branch: .headRefName, author: .author.login}] | sort_by(.pr)'
+  )"
+fi
 CANDIDATE_COUNT="$(jq 'length' <<<"$CANDIDATES")"
 log "$CANDIDATE_COUNT candidato(s)"
 
@@ -114,19 +121,49 @@ while read -r row; do
     files="$(git diff --name-only --diff-filter=U || true)"
     git merge --abort || git reset --hard --quiet HEAD
 
-    # Contra quem conflitou? Procuramos, entre as features JA no conjunto, a
-    # ultima que tocou algum dos arquivos em conflito. Vazio => o conflito e
-    # com a propria main (a branch esta desatualizada).
+    # Contra QUEM, exatamente?
+    #
+    # "Tocou o mesmo arquivo" nao serve como resposta: numa POC onde tres
+    # branches editam o mesmo registry, isso aponta o culpado errado toda vez
+    # que a terceira mexe noutra regiao. E o comentario no PR precisa acertar --
+    # ele diz para a pessoa esperar o merge de um PR especifico.
+    #
+    # Entao reproduzimos o conflito em pares, que e barato (merge e instantaneo)
+    # e exato:
+    #   1. main + X conflita?           -> a branch esta atras da main
+    #   2. main + F + X conflita?       -> o primeiro F que conflitar e a resposta
     against='null'
-    while read -r inc; do
-      [ -n "$inc" ] || continue
-      inc_sha="$(jq -r '.sha' <<<"$inc")"
-      inc_pr="$(jq -r '.pr' <<<"$inc")"
-      touched="$(git diff --name-only "$BASE_SHA...$inc_sha" || true)"
-      if [ -n "$files" ] && [ -n "$touched" ] && grep -qxF -f <(printf '%s\n' "$touched") <(printf '%s\n' "$files"); then
-        against="$inc_pr"
-      fi
-    done < <(jq -c '.[]' <<<"$INCLUDED")
+    probe_files="$files"
+
+    git checkout --quiet -B __probe "$BASE_SHA"
+    if git merge --no-ff --no-edit -m probe "$sha" >/dev/null 2>&1; then
+      while read -r inc; do
+        [ -n "$inc" ] || continue
+        inc_pr="$(jq -r '.pr' <<<"$inc")"
+        inc_sha="$(jq -r '.sha' <<<"$inc")"
+
+        git checkout --quiet -B __probe "$BASE_SHA"
+        if ! git merge --no-ff --no-edit -m probe-base "$inc_sha" >/dev/null 2>&1; then
+          git merge --abort >/dev/null 2>&1 || true
+          continue
+        fi
+        if ! git merge --no-ff --no-edit -m probe "$sha" >/dev/null 2>&1; then
+          against="$inc_pr"
+          probe_files="$(git diff --name-only --diff-filter=U || true)"
+          git merge --abort >/dev/null 2>&1 || true
+          break
+        fi
+      done < <(jq -c '.[]' <<<"$INCLUDED")
+    else
+      # Conflita sozinha em cima da main: nao e briga com outra feature, a
+      # branch e que esta desatualizada.
+      probe_files="$(git diff --name-only --diff-filter=U || true)"
+      git merge --abort >/dev/null 2>&1 || true
+    fi
+
+    git checkout --quiet "$ENV_NAME"
+    git branch -D __probe >/dev/null 2>&1 || true
+    files="$probe_files"
 
     log "CONFLITO #$pr $branch (vs ${against}) -> $(tr '\n' ' ' <<<"$files")"
     EXCLUDED="$(jq -c --argjson pr "$pr" --arg b "$branch" --arg s "$sha" --arg a "$author" \

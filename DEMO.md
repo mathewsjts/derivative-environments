@@ -1,0 +1,381 @@
+# DEMO — 20 minutos
+
+> **A tese, em uma frase:** `dev` e `hom` deixam de ser branches que recebem
+> merge e viram **artefatos derivados** — reconstruídos do zero a partir da
+> `main` mais os PRs marcados por label. Um PR por feature, zero cherry-pick,
+> e conflito de uma branch não trava o ambiente das outras.
+
+| # | Bloco | Tempo | Termina quando |
+|---|---|---|---|
+| 0 | Preparação (antes de subir ao palco) | T-10 | duas URLs da Vercel respondendo |
+| 1 | Estado inicial | 2 min | plateia viu `hom` = `main` |
+| 2 | Montar `hom` ao vivo | 3 min | `/version` mostra `main + a + c` |
+| 3 | O conflito de B | 4 min | comentário lido em voz alta |
+| 4 | Push de correção em A | 3 min | reconstruiu sem re-labelar nada |
+| 5 | Merge de A na `main` | 4 min | B volta, comentário "✅" |
+| 6 | O gate antes da `main` | 2 min | PR de lint vermelho |
+| 7 | Fechamento | 2 min | — |
+
+**Deixe abertas, em abas fixas:** os 3 PRs · a aba Actions · `/version` de `hom`
+· `/version` de `dev` · um terminal no repositório.
+
+---
+
+## 0. Preparação — T-10 min
+
+```bash
+./.github/scripts/test-assemble.sh    # 29 verificações offline, ~5s
+./scripts/seed-demo.sh                # 3 PRs + primeira reconstrução
+gh run list --limit 5                 # rebuild-env e fake-deploy verdes
+```
+
+Deixe a branch do bloco 6 **empurrada, mas sem PR** — assim ela não aparece como
+um quarto PR no bloco 1, e abrir o PR ao vivo custa um comando:
+
+```bash
+git checkout -b feat/d-lint-error origin/main
+printf '\nconst naoUsado = "isto reprova no lint";\n' >> src/routes/health.ts
+git commit -aqm "feat(health): variavel nao usada, de proposito"
+git push -q -u origin feat/d-lint-error
+git checkout -q main
+```
+
+Confira as duas URLs (SETUP.md §5). Estado esperado:
+
+- `dev` → `main + feat/a-user-endpoint + feat/c-metrics-endpoint`
+- `hom` → `main`
+
+> Se `main` exige 1 approve e você está sozinho, resolva **agora** — o bloco 5
+> depende de mergear um PR. Ver a nota no fim de SETUP.md §3b.
+
+---
+
+## 1. Estado inicial — 2 min
+
+**Mostrar:** a lista de PRs.
+
+```bash
+gh pr list --state open --base main
+```
+
+> Três features, três PRs, todos para a `main`. **Não existe PR para `dev`, não
+> existe PR para `hom`.** No modelo de hoje, cada uma dessas features viraria
+> até três PRs — um por ambiente — e o review aconteceria na branch de
+> homologação.
+
+**Mostrar:** `/version` de `hom` no browser.
+
+```json
+{ "environment": "hom", "summary": "main", "features": [], "excluded": [] }
+```
+
+> `hom` está vazia: hoje ela é exatamente a `main`. E `dev` já tem duas features
+> dentro — mesmo mecanismo, montado antes de vocês chegarem. Vou montar `hom`
+> do zero, aqui, agora.
+
+**Mostrar rapidamente:** `src/routes/index.ts` na `main`, os blocos de
+marcadores. Esse é o arquivo em que as três features escrevem.
+
+---
+
+## 2. Montar `hom` ao vivo — 3 min
+
+**Fazer:** aplicar `deploy:hom` nos PRs de **A** e **C**, pelo browser (é mais
+legível para a plateia do que um comando).
+
+> PR #1 → Labels → `deploy:hom`. PR #3 → Labels → `deploy:hom`.
+
+Ou, se preferir terminal:
+
+```bash
+gh pr edit 1 --add-label deploy:hom
+gh pr edit 3 --add-label deploy:hom
+```
+
+**Enquanto o job roda (~90s), diga:**
+
+> Ninguém fez merge em `hom`. Ninguém abriu um PR para `hom`. O que essas duas
+> pessoas fizeram foi declarar uma **intenção**: "quero minha branch no próximo
+> `hom`". O job faz o resto — `reset` na `main` de agora e reaplica as branches
+> marcadas, na ordem do número do PR.
+>
+> E ele monta em dois passes: primeiro descobre quem mergeia limpo, depois
+> remonta o conjunto do zero com datas fixas. Por causa disso, rodar duas vezes
+> seguidas sem mudança nenhuma dá **exatamente o mesmo SHA** — e o job nem
+> publica, porque não há o que publicar.
+
+**Mostrar:** a aba Actions, o resumo do job `reconstruir hom` (tabela com ✅/⛔).
+
+**Mostrar:** `/version` de `hom` — agora `main + feat/a-user-endpoint +
+feat/c-metrics-endpoint`.
+
+**Mostrar — este é o item que prova o token:** o workflow **`fake-deploy`**
+rodou logo depois.
+
+> Repare que existe um segundo job aqui. Ele rodou porque o push em `hom` foi
+> feito por um **GitHub App**. Se eu tivesse usado o `GITHUB_TOKEN` padrão do
+> Actions, o push teria funcionado, a branch teria atualizado, e **o deploy
+> simplesmente não rodaria** — sem erro, sem log, sem aviso. O GitHub bloqueia
+> workflows disparados pelo token dele mesmo, para evitar recursão. É a falha
+> mais silenciosa deste modelo inteiro, e é por isso que ela tem um workflow só
+> para ficar visível.
+
+---
+
+## 3. O conflito de B — 4 min
+
+**Fazer:** aplicar `deploy:hom` no PR de **B**.
+
+```bash
+gh pr edit 2 --add-label deploy:hom
+```
+
+**Enquanto o job roda (~90s), diga:**
+
+> B registra a rota dela **no mesmo ponto** de `src/routes/index.ts` que A. As
+> duas conflitam. A pergunta que interessa é: o que acontece com `hom`?
+>
+> No modelo de hoje, alguém resolveria esse conflito na branch de homologação, e
+> aí `hom` passaria a ter um commit que não existe em lugar nenhum. Ou pediria
+> para B rebasear em cima de A — e a branch de B passaria a carregar código de
+> uma feature que talvez nunca seja mergeada.
+
+**Mostrar:** o resumo do job — A e C com ✅, B com ⛔.
+
+**Mostrar:** `/version` de `hom`. **Continua `main + a + c`**, e agora o campo
+`excluded` traz B, com o motivo e o arquivo.
+
+> O ambiente não caiu, não travou, não ficou pela metade. A exclusão é
+> **cirúrgica**: B ficou de fora, A e C seguem no ar. Quem não conflita não
+> paga o preço de quem conflita.
+
+**Mostrar:** o comentário no PR #2. **Leia em voz alta**, inteiro. E pare nesta
+linha:
+
+> ### **"Nada a fazer no seu PR: ele continua limpo."**
+>
+> Essa linha é a parte mais importante do comentário. Sem ela, a primeira pessoa
+> que recebe esse aviso vai tentar resolver o conflito na branch dela — que é
+> exatamente o que este modelo elimina. `hom` é descartável. Resolver conflito
+> ali, ou por causa dali, é trabalho jogado fora.
+
+**Mencione:** a label `blocked:hom` que apareceu no PR.
+
+> Isso é a marca de estado. O job comenta **uma vez**, em transição. Enquanto o
+> conflito persistir, silêncio absoluto — pode rodar vinte vezes, não sai um
+> segundo comentário. Não existe banco de dados nisso: o estado mora na label.
+
+---
+
+## 4. Push de correção em A — 3 min
+
+> Este é o bloco que mata o cherry-pick do processo atual.
+
+**Fazer:**
+
+```bash
+git checkout feat/a-user-endpoint
+printf '\nusersRouter.get("/count", (_req, res) => res.json({ count: 2 }));\n' >> src/routes/users.ts
+git commit -aqm "feat(users): endpoint de contagem"
+git push -q
+git checkout -q main
+```
+
+**Enquanto o job roda (~90s), diga:**
+
+> Não toquei em label nenhuma. Não abri PR nenhum. Não fiz cherry-pick de nada.
+> Um push na branch da feature, e os ambientes que contêm essa branch se
+> reconstroem sozinhos.
+>
+> No modelo de hoje, essa correção seria: commit na branch, PR para `dev`,
+> merge, cherry-pick para `hom`, merge, e depois torcer para não esquecer de
+> levar o mesmo commit para a `main`. Três merges e um cherry-pick para uma
+> linha de código.
+
+**Mostrar:** `/version` de `hom` — o SHA mudou, o conjunto é o mesmo.
+E `curl` no endpoint novo:
+
+```bash
+curl -s https://<projeto>-git-hom-<escopo>.vercel.app/users/count
+```
+
+**Mostrar:** o PR #2 de B **não recebeu comentário novo**. Continua em conflito,
+continua em silêncio.
+
+---
+
+## 5. Merge de A na `main` — 4 min
+
+**Fazer:** mergear o PR #1 pelo browser (Squash ou Merge, tanto faz).
+
+**Enquanto os jobs rodam, diga:**
+
+> Merge na `main` é o único gatilho de produção, e ele redispara a reconstrução
+> dos dois ambientes — a base mudou.
+
+**Mostrar:** `hom` reconstruiu. A não aparece mais como feature: ela **é** a
+`main` agora. B continua fora — e **não recebeu comentário**, porque o estado
+dela não mudou.
+
+**Mostrar:** o PR #2 de B, com o job `sincronia com a main` **vermelho**.
+
+> Agora o gate diz para B o que fazer, e a diferença é toda: o conflito de B
+> não é mais contra a branch especulativa de alguém. É contra código real,
+> revisado e mergeado. Resolver agora é resolver **uma vez**.
+
+**Fazer — resolução à mão, no palco:**
+
+```bash
+git checkout feat/b-auth-endpoint
+git fetch origin main
+git rebase origin/main
+```
+
+> Conflito em `src/routes/index.ts`.
+
+Abra o arquivo, mantenha **os dois lados** (a linha de A e a linha de B), e:
+
+```bash
+git add src/routes/index.ts
+git rebase --continue
+git push --force-with-lease
+git checkout -q main
+```
+
+**Enquanto o job roda, diga:**
+
+> Repare no que eu fiz e no que eu **não** fiz. Eu não resolvi conflito contra a
+> branch de outra pessoa. Eu rebaseei na `main` — código que já passou por
+> review e já está em produção. É a operação que qualquer um faz todo dia, e é a
+> única resolução de conflito que este modelo produz.
+
+**Mostrar:** o comentário **"✅ De volta ao ambiente `hom`"** no PR #2, e a label
+`blocked:hom` removida.
+
+**Mostrar:** `/version` de `hom` — as três rotas no ar.
+
+---
+
+## 6. O gate antes da `main` — 2 min
+
+**Fazer:** abrir o PR da branch que você já empurrou no bloco 0.
+
+```bash
+gh pr create --base main --head feat/d-lint-error \
+  --title "feat(health): mudanca com erro de lint" \
+  --body "PR de demonstração: o gate reprova antes da main."
+```
+
+**Mostrar:** o job `typecheck / lint / testes` vermelho, e a `main` bloqueada.
+
+> Isso aqui não é novidade — é CI. A novidade é **onde** ele roda. Existe um só
+> PR por feature, e ele aponta para a `main`. Então os gates rodam uma vez, no
+> lugar certo, antes de qualquer ambiente.
+>
+> Ligando ao nosso número: hoje, **10 de 10 falhas de Sonar acontecem depois do
+> merge** — porque o review acontece na branch de homologação e a análise roda
+> quando o código já está em `hom`. Neste modelo isso é estruturalmente
+> impossível: não existe merge antes do gate, porque não existe merge em
+> ambiente.
+
+---
+
+## 7. Fechamento — 2 min
+
+> **Um PR por feature.** Não três. Review em um lugar só, contra a `main`.
+>
+> **Zero cherry-pick.** Correção é push na branch; os ambientes se reconstroem.
+>
+> **Reset de ambiente é a operação normal**, não um procedimento de emergência.
+> `dev` e `hom` são descartáveis por construção — se estiverem estranhos, a
+> resposta é reconstruir, e reconstruir é o que já acontece o tempo todo.
+>
+> **Conflito é informação, não bloqueio.** A branch fica de fora, o dono é
+> avisado uma vez, e o ambiente continua servindo todo mundo.
+
+E o que eu deliberadamente **não** construí:
+
+> Sem `git rerere`, sem fila de prioridade entre branches, sem merge queue, sem
+> ambiente efêmero por PR. Todas são otimizações para problemas cuja frequência
+> a gente ainda não mediu. Este modelo é o mínimo que resolve o que dói hoje —
+> e é ele que vai gerar o número que justifica (ou não) a próxima peça.
+
+---
+
+## Se der errado ao vivo
+
+### Forçar uma reconstrução
+
+O gatilho mais usado da demo. Actions → **rebuild-env** → **Run workflow** →
+escolha o ambiente. Ou:
+
+```bash
+gh workflow run rebuild-env.yml -f environment=hom
+gh run watch
+```
+
+É idempotente e stateless: pode rodar quantas vezes quiser, inclusive no meio de
+outra execução.
+
+### A Vercel está demorando
+
+Diga, sem apressar:
+
+> O deploy é o pedaço que eu **não** mudei nesta proposta. Ele continua sendo
+> disparado por push na branch de ambiente, exatamente como hoje. O que mudou é
+> quem faz o push.
+
+E mostre a verdade pelo git, que é instantâneo e mais convincente que o browser:
+
+```bash
+git fetch origin hom && git log --oneline origin/main..origin/hom
+git show origin/hom:build-manifest.json | jq
+```
+
+> O ambiente inteiro cabe em cinco linhas de log: a `main`, um merge por feature,
+> e o manifesto. Nada mais existe em `hom` — é isso que "derivado" significa.
+
+O resumo do job na aba Actions traz a mesma tabela, também sem esperar a Vercel.
+
+### Um run aparece "cancelado"
+
+É esperado. `cancel-in-progress: true` por ambiente: se você clicar em duas
+labels rápido, a reconstrução mais nova cancela a anterior. Diga que é de
+propósito — a execução mais nova monta a partir da `main` de agora, então a
+anterior já nasceu obsoleta.
+
+### O job falhou no `npm audit`
+
+Advisory novo publicado entre o ensaio e a demo. Não tente consertar no palco:
+
+> O gate está fazendo o trabalho dele. Um advisory foi publicado desde ontem, e
+> nenhum código entra na `main` até alguém olhar.
+
+E siga — nenhum bloco depende desse job estar verde, exceto o merge do bloco 5.
+Se travar o merge, use **Merge without waiting for requirements** (você é admin).
+
+### Um PR ficou com `blocked:hom` de um ensaio anterior
+
+```bash
+gh pr edit <N> --remove-label blocked:hom
+gh workflow run rebuild-env.yml -f environment=hom
+```
+
+### Recomeçar a demo do zero
+
+```bash
+./scripts/seed-demo.sh --reset
+./scripts/seed-demo.sh
+```
+
+Fecha os PRs, apaga as branches de feature e os ambientes, e recria tudo. Leva
+cerca de um minuto contando a primeira reconstrução.
+
+### Nada funciona e o tempo está acabando
+
+Rode o harness offline — ele não depende de GitHub, de Vercel, nem de rede, e
+demonstra o mecanismo inteiro em cinco segundos, incluindo o bloco 5:
+
+```bash
+./.github/scripts/test-assemble.sh
+```

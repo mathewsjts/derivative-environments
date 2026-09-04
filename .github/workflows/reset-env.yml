@@ -1,0 +1,192 @@
+# ---------------------------------------------------------------------------
+# reset-env.yml
+#
+# POR QUE EXISTE
+#
+# Esvaziar um ambiente e uma operacao NORMAL neste modelo, nao um procedimento
+# de emergencia: dev e hom sao artefatos derivados e descartaveis. Mas esvaziar
+# a mao significa abrir cada PR e tirar a label um por um -- lento no dia a dia
+# e inviavel no meio de uma apresentacao.
+#
+# Este workflow tira a label deploy:<env> de TODOS os PRs abertos de uma vez.
+#
+# Nao fecha PR, nao apaga branch, nao toca em codigo. Devolve as vagas.
+#
+# COMO O AMBIENTE VOLTA A SER `main` DEPOIS DISSO
+#
+# Nao ha nada aqui que reconstrua o ambiente, e nao precisa haver: remover a
+# label com o token do GitHub App emite um evento `pull_request: unlabeled`, que
+# e um dos gatilhos do rebuild-env. Ele reconstroi sozinho.
+#
+# (Com o GITHUB_TOKEN padrao isso NAO aconteceria -- e a mesma armadilha que o
+# fake-deploy.yml existe para demonstrar. Ver SETUP.md, secao 1.)
+#
+# Se por algum motivo a reconstrucao nao disparar:
+#   gh workflow run rebuild-env.yml -f environment=<env>
+# ---------------------------------------------------------------------------
+name: reset-env
+
+# Manual, e so manual. Nao existe gatilho automatico de propósito: esvaziar um
+# ambiente e sempre uma decisao de alguem, nunca uma consequencia de um push.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Qual ambiente esvaziar
+        type: choice
+        options: [dev, hom, ambos]
+        default: dev
+      dry_run:
+        description: "So listar quem seria afetado, sem remover nada"
+        type: boolean
+        default: false
+      comment:
+        description: "Comentar nos PRs avisando da remocao"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: reset-env-${{ github.event.inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  reset:
+    name: esvaziar ${{ github.event.inputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Exigir credenciais do GitHub App
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "${APP_ID:-}" ] && [ -n "${APP_PRIVATE_KEY:-}" ]; then
+            echo "Credenciais do App presentes."
+            exit 0
+          fi
+          echo "::error title=GitHub App nao configurado::APP_ID e/ou APP_PRIVATE_KEY ausentes."
+          {
+            echo ""
+            echo "Sem o App, remover a label nao emitiria evento e o ambiente"
+            echo "continuaria publicado com o conjunto antigo -- sem erro nenhum."
+            echo ""
+            echo "Configure conforme SETUP.md, secao 1."
+            echo ""
+          } >&2
+          exit 1
+
+      - name: Token do GitHub App
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Esvaziar
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          SELECTED: ${{ github.event.inputs.environment }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          COMMENT: ${{ github.event.inputs.comment }}
+        run: |
+          set -euo pipefail
+
+          if [ "$SELECTED" = "ambos" ]; then
+            ENVS="dev hom"
+          else
+            ENVS="$SELECTED"
+          fi
+
+          TOTAL=0
+          {
+            echo "## 🧹 reset-env"
+            echo ""
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "> **dry-run**: nada foi removido."
+              echo ""
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          for env_name in $ENVS; do
+            deploy_label="deploy:${env_name}"
+            blocked_label="blocked:${env_name}"
+
+            echo "=== $env_name ==="
+            echo "### \`${env_name}\`" >> "$GITHUB_STEP_SUMMARY"
+
+            prs="$(gh pr list --state open --label "$deploy_label" --limit 100 \
+                     --json number,headRefName,author \
+                     --jq '.[] | [.number, .headRefName, .author.login] | @tsv')"
+
+            if [ -z "$prs" ]; then
+              echo "  nenhum PR com $deploy_label"
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "Nenhum PR carregava \`${deploy_label}\`. Nada a fazer." >> "$GITHUB_STEP_SUMMARY"
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "| PR | branch | autor |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+
+            while IFS=$'\t' read -r pr branch author; do
+              [ -n "${pr:-}" ] || continue
+              TOTAL=$((TOTAL + 1))
+              echo "  #${pr} ${branch} (@${author})"
+              echo "| #${pr} | \`${branch}\` | @${author} |" >> "$GITHUB_STEP_SUMMARY"
+
+              if [ "$DRY_RUN" = "true" ]; then
+                continue
+              fi
+
+              if [ "$COMMENT" = "true" ]; then
+                {
+                  echo "### 🧹 Label \`${deploy_label}\` removida"
+                  echo ""
+                  echo "O ambiente \`${env_name}\` foi esvaziado manualmente"
+                  echo "(\`reset-env\`, acionado por @${{ github.actor }})."
+                  echo ""
+                  echo "**Nada aconteceu com o seu PR.** Ele continua aberto, com os"
+                  echo "mesmos commits e o mesmo review — só saiu do conjunto de"
+                  echo "\`${env_name}\`."
+                  echo ""
+                  echo "Para voltar, aplique \`${deploy_label}\` de novo: a próxima"
+                  echo "reconstrução inclui a branch sem mais nenhum passo."
+                  echo ""
+                  echo "<sub>🤖 \`reset-env\`</sub>"
+                } > "/tmp/reset-${env_name}-${pr}.md"
+                gh api -X POST "repos/${GH_REPO}/issues/${pr}/comments" \
+                  -F "body=@/tmp/reset-${env_name}-${pr}.md" --silent
+              fi
+
+              # REST, e nao `gh pr edit`: o subcomando passa por GraphQL e exige
+              # o escopo read:org. Ver .github/scripts/notify.sh.
+              gh api -X DELETE "repos/${GH_REPO}/issues/${pr}/labels/${deploy_label}" --silent
+
+              # A marca de estado do conflito perde o sentido junto com a vaga.
+              # Removida em silencio: o PR saiu do conjunto, nao "voltou" a ele.
+              gh api -X DELETE "repos/${GH_REPO}/issues/${pr}/labels/${blocked_label}" \
+                --silent 2>/dev/null || true
+            done <<< "$prs"
+
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          {
+            echo ""
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "**${TOTAL} PR(s) seriam afetados.** Rode de novo com \`dry_run\` desmarcado."
+            elif [ "$TOTAL" -eq 0 ]; then
+              echo "Nada a fazer: nenhum ambiente selecionado tinha PRs marcados."
+            else
+              echo "**${TOTAL} label(s) removida(s).** O \`rebuild-env\` foi disparado pelo"
+              echo "evento \`pull_request: unlabeled\` e vai republicar o ambiente sem elas."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -64,6 +64,7 @@ build-manifest.json         escrito pelo job; a fonte de verdade do /version
   pr-gates.yml              typecheck, lint, testes, audit, docker, Sonar, sincronia
   rebuild-env.yml           o job que deriva dev e hom da main
   label-ttl.yml             devolve a vaga de PR parado
+  reset-env.yml             esvazia um ambiente (manual) tirando todas as labels
   fake-deploy.yml           prova que o push do App dispara workflows
 
 .github/scripts/
@@ -93,14 +94,28 @@ ambiente inteiro.
 **As datas dos commits são pinadas.** Data de autor e de committer entram no
 hash do merge commit — sem fixá-las, duas execuções idênticas produziriam SHAs
 diferentes e a Vercel redeployaria à toa. A data é função pura das entradas (o
-maior committer date entre a `main` e as features do conjunto), então o mesmo
-conjunto sempre produz o mesmo SHA — e o job detecta isso e não publica.
+maior committer date entre a `main` e as features do conjunto), então a mesma
+história de merges sempre produz os mesmos commits.
+
+**E o manifesto registra `previousEnvHead`.** O determinismo acima tem uma
+armadilha: *voltar* a um conjunto já publicado reproduz o commit byte a byte, e
+um provedor que deduplica deploy por SHA — a Vercel faz — ignora esse push sem
+mover o alias da branch. A branch anda, a URL fica parada num conjunto antigo, e
+não há erro em lugar nenhum. Gravar o SHA que o ambiente substituiu torna cada
+transição única. O teste de "nada mudou" passou a comparar o **conjunto**
+publicado (base, features, excluded), não o SHA — então rodar duas vezes sem
+mudança continua sendo no-op de verdade.
 
 **A atribuição do conflito é por reprodução, não por heurística.** Saber que
 duas branches "tocaram o mesmo arquivo" não diz qual delas é o par do conflito.
 O job reproduz em pares (`main + X`, depois `main + F + X` para cada F já no
 conjunto) e reporta o primeiro que conflita. É barato e acerta o PR certo — que
 importa, porque o comentário manda a pessoa esperar um PR específico.
+
+**O ambiente anterior não entra no build.** O job lê exatamente duas coisas da
+branch de ambiente: o SHA (para o `--force-with-lease`) e o manifesto (para
+responder "o conjunto mudou?"). Nenhum byte do conteúdo anterior sobrevive — a
+montagem parte sempre de `origin/main`.
 
 **A notificação usa label como estado.** `blocked:<env>` é a única memória do
 sistema. Sem ela, um job que roda a cada push transformaria um conflito de meio

@@ -35,6 +35,18 @@ export interface BuildManifest {
   /** "dev" | "hom" | "main" | "local" */
   environment: string;
   base: { branch: string; sha: string };
+  /**
+   * SHA da branch de ambiente que este build substituiu (null na primeira
+   * publicacao e na main).
+   *
+   * Existe por dois motivos. O primeiro e auditoria: a branch passa a dizer de
+   * onde veio. O segundo e menos obvio e mais importante -- como a montagem e
+   * deterministica, voltar a um conjunto ja publicado reproduziria o commit
+   * byte a byte, e um provedor que deduplica deploy por SHA (a Vercel faz)
+   * ignoraria o push sem mover o alias da branch: a URL ficaria servindo um
+   * conjunto antigo, silenciosamente. Este campo torna cada transicao unica.
+   */
+  previousEnvHead: string | null;
   features: FeatureRef[];
   excluded: ExcludedRef[];
 }

@@ -358,6 +358,20 @@ Advisory novo publicado entre o ensaio e a demo. Não tente consertar no palco:
 E siga — nenhum bloco depende desse job estar verde, exceto o merge do bloco 5.
 Se travar o merge, use **Merge without waiting for requirements** (você é admin).
 
+### Esvaziar um ambiente inteiro de uma vez
+
+Actions → **reset-env** → **Run workflow** → escolha o ambiente. Tira
+`deploy:<env>` de todos os PRs abertos de uma vez e o `rebuild-env` reconstrói
+sozinho (a remoção da label pelo App emite `pull_request: unlabeled`). Ou:
+
+```bash
+gh workflow run reset-env.yml -f environment=hom
+gh workflow run reset-env.yml -f environment=hom -f dry_run=true   # só listar
+```
+
+Serve para voltar ao estado do bloco 1 sem recriar PR nenhum. Não fecha PR, não
+apaga branch: só devolve as vagas.
+
 ### Um PR ficou com `blocked:hom` de um ensaio anterior
 
 ```bash

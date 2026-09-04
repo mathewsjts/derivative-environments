@@ -1,6 +1,10 @@
 {
   "environment": "main",
-  "base": { "branch": "main", "sha": "" },
+  "base": {
+    "branch": "main",
+    "sha": ""
+  },
+  "previousEnvHead": null,
   "features": [],
   "excluded": []
 }

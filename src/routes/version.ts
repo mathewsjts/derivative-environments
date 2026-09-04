@@ -22,6 +22,7 @@ versionRouter.get('/', (_req, res) => {
     branch: process.env.VERCEL_GIT_COMMIT_REF ?? manifest.environment,
     commit: process.env.VERCEL_GIT_COMMIT_SHA ?? null,
     base: manifest.base,
+    previousEnvHead: manifest.previousEnvHead,
     summary: summarize(manifest),
     featureCount: manifest.features.length,
     features: manifest.features,

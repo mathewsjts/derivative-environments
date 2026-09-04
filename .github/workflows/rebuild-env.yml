@@ -104,6 +104,15 @@ jobs:
   #
   # A lista de ambientes do job seguinte sai daqui. Lista vazia = nenhum job,
   # e nao um job que nasce so para desistir.
+  #
+  # E a lista e o mais curta possivel. O evento diz o que mudou, entao da para
+  # nao reconstruir o que nao mudou:
+  #
+  #   labeled/unlabeled  -> so o ambiente da label. deploy:hom nao mexe em dev.
+  #   closed/reopened    -> os dois: o PR pode estar nos dois conjuntos.
+  #   push na main       -> os dois: a base mudou.
+  #   push numa feature  -> so os ambientes cujo conjunto contem a branch.
+  #   workflow_dispatch  -> o que o input `environment` pedir.
   # -------------------------------------------------------------------------
   guard:
     name: quais ambientes este evento afeta
@@ -121,6 +130,14 @@ jobs:
           # de App so para responder uma pergunta.
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          # Tudo que a decisao le entra por env, e nao interpolado no meio do
+          # script: assim da para extrair este bloco e roda-lo no laptop
+          # trocando so as variaveis. Ja pegou bug.
+          EVENT_NAME: ${{ github.event_name }}
+          # labeled | unlabeled | closed | reopened. Vazio em push e em
+          # workflow_dispatch, que nao tem `action`.
+          EVENT_ACTION: ${{ github.event.action || '' }}
+          REF_NAME: ${{ github.ref_name }}
           SELECTED: ${{ github.event.inputs.environment || 'ambos' }}
           MAX_OVERRIDE: ${{ github.event.inputs.max_set || '' }}
           CHANGED_LABEL: ${{ github.event.label.name || '' }}
@@ -149,6 +166,7 @@ jobs:
           esac
 
           include='[]'
+          skipped=()
 
           for entry in "dev:10:VERCEL_URL_DEV" "hom:5:VERCEL_URL_HOM"; do
             env_name="${entry%%:*}"
@@ -160,24 +178,47 @@ jobs:
             reason=""
             wanted=false
 
-            if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
+            if [ "$EVENT_NAME" = "workflow_dispatch" ] \
                && [ "$SELECTED" != "ambos" ] && [ "$SELECTED" != "$env_name" ]; then
               reason="disparo manual pediu '$SELECTED'"
-            elif [ "${{ github.event_name }}" != "push" ]; then
-              wanted=true
-              reason="evento ${{ github.event_name }}: pode ter mudado o conjunto"
-            elif [ "${{ github.ref_name }}" = "main" ]; then
-              wanted=true
-              reason="push na main: a base mudou"
-            else
-              n=$(gh pr list --state open --base main --head "${{ github.ref_name }}" \
-                    --label "deploy:$env_name" --json number --jq 'length')
-              if [ "$n" -gt 0 ]; then
+
+            elif [ "$EVENT_NAME" = "push" ]; then
+              if [ "$REF_NAME" = "main" ]; then
+                # A base mudou: os DOIS ambientes sao derivados dela.
                 wanted=true
-                reason="a branch esta no conjunto"
+                reason="push na main: a base mudou"
               else
-                reason="a branch nao esta no conjunto"
+                n=$(gh pr list --state open --base main --head "$REF_NAME" \
+                      --label "deploy:$env_name" --json number --jq 'length')
+                if [ "$n" -gt 0 ]; then
+                  wanted=true
+                  reason="a branch esta no conjunto"
+                else
+                  reason="a branch nao esta no conjunto"
+                fi
               fi
+
+            elif [ "$EVENT_ACTION" = "labeled" ] || [ "$EVENT_ACTION" = "unlabeled" ]; then
+              # Uma label mexe no conjunto de UM ambiente so. Aplicar deploy:hom
+              # reconstruia dev tambem, para concluir no-op depois de montar o
+              # conjunto inteiro -- trabalho e minuto faturado por nada.
+              #
+              # Qualquer outra label (blocked:*, que o filtro acima ja pegou, ou
+              # uma label de processo como `bug`) nao entra em conjunto nenhum:
+              # nenhum ambiente precisa ser reconstruido.
+              if [ "$CHANGED_LABEL" = "deploy:$env_name" ]; then
+                wanted=true
+                reason="a label $CHANGED_LABEL mudou o conjunto deste ambiente"
+              else
+                reason="a label '$CHANGED_LABEL' nao muda o conjunto de $env_name"
+              fi
+
+            else
+              # closed / reopened: o PR pode estar nos dois conjuntos, e o evento
+              # nao diz em quais. Reconstroi os dois.
+              # Tambem cai aqui o workflow_dispatch que pediu este ambiente.
+              wanted=true
+              reason="evento $EVENT_NAME${EVENT_ACTION:+/$EVENT_ACTION}: pode ter mudado o conjunto"
             fi
 
             if [ "$wanted" = true ]; then
@@ -186,6 +227,7 @@ jobs:
                 '. + [{env:$e, max:$m, urlKey:$u}]' <<<"$include")"
             else
               echo "  $env_name: pular ($reason)"
+              skipped+=("$env_name|$reason")
             fi
           done
 
@@ -200,6 +242,16 @@ jobs:
               jq -r '.[] | "- `\(.env)` (teto \(.max))"' <<<"$include"
             else
               echo "Nenhum. Este evento nao afeta nenhum ambiente."
+            fi
+            # Dizer por que um ambiente ficou de fora e o que evita a pergunta
+            # "por que hom nao reconstruiu?" virar investigacao.
+            if [ "${#skipped[@]}" -gt 0 ]; then
+              echo ""
+              echo "Fora desta reconstrucao:"
+              echo ""
+              for s in "${skipped[@]}"; do
+                printf -- '- `%s`: %s\n' "${s%%|*}" "${s#*|}"
+              done
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 

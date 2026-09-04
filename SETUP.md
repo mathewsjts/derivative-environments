@@ -206,6 +206,11 @@ Se você já criou o ruleset com `strict` desligado, ligue em
 **Settings → Rules → `main protegida` → Require branches to be up to date before
 merging**.
 
+> Ligar o `strict` sem automação transformaria cada push na `main` numa rodada
+> de rebase manual. O workflow `sync-prs.yml` cobre isso: a cada push na `main`
+> ele atualiza os PRs abertos com o *Update branch* nativo. Não precisa de
+> configuração nova — usa o mesmo GitHub App do passo 1.
+
 > **Na demo, com 1 approve exigido e só você na sala:** você não consegue aprovar
 > o próprio PR. Ou peça o approve a alguém antes de começar, ou faça o bloco 5
 > com `enforcement: "evaluate"` neste ruleset, ou desligue temporariamente a

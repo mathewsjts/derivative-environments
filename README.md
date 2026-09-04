@@ -63,6 +63,7 @@ build-manifest.json         escrito pelo job; a fonte de verdade do /version
 .github/workflows/
   pr-gates.yml              typecheck, lint, testes, audit, docker, Sonar, sincronia
   rebuild-env.yml           o job que deriva dev e hom da main
+  sync-prs.yml              atualiza os PRs abertos quando a main anda
   label-ttl.yml             devolve a vaga de PR parado
   reset-env.yml             esvazia um ambiente (manual) tirando todas as labels
   fake-deploy.yml           prova que o push do App dispara workflows
@@ -131,6 +132,16 @@ que só quem tem permissão de escrita aplica.
 branch de ambiente: o SHA (para o `--force-with-lease`) e o manifesto (para
 responder "o conjunto mudou?"). Nenhum byte do conteúdo anterior sobrevive — a
 montagem parte sempre de `origin/main`.
+
+**Estar atrasada não exclui uma branch do ambiente.** A montagem sempre parte de
+`origin/main` e faz merge da branch: uma branch atrás da `main` entra
+normalmente enquanto não conflitar. O `sync-prs` existe por outros três motivos
+— com `strict` ligado o PR desatualizado não mergeia; os gates do PR rodariam
+contra uma `main` que não existe mais (que é o "o Sonar reprova depois do merge"
+que este modelo ataca); e quanto mais a branch atrasa, mais provável ela
+conflitar. Ele atualiza com o *Update branch* nativo (merge, sem force-push) e,
+em conflito, **pula e segue** — resolver conflito contra a `main` é trabalho
+humano, feito uma vez, no PR.
 
 **A notificação usa label como estado.** `blocked:<env>` é a única memória do
 sistema. Sem ela, um job que roda a cada push transformaria um conflito de meio

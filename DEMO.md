@@ -280,7 +280,7 @@ gh pr create --base main --head feat/d-lint-error \
   --body "PR de demonstração: o gate reprova antes da main."
 ```
 
-**Mostrar:** o job `typecheck / lint / testes` vermelho, e a `main` bloqueada.
+**Mostrar:** o job `gates do PR` vermelho no passo `lint`, e a `main` bloqueada.
 
 > Isso aqui não é novidade — é CI. A novidade é **onde** ele roda. Existe um só
 > PR por feature, e ele aponta para a `main`. Então os gates rodam uma vez, no

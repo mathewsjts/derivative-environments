@@ -1,0 +1,20 @@
+# Agressivo de proposito: o contexto enviado ao daemon e o que domina o tempo
+# de `docker build`. Meta da POC: build limpo < 30s.
+node_modules
+dist
+.git
+.github
+.vercel
+test
+scripts
+coverage
+*.md
+.gitignore
+.dockerignore
+eslint.config.mjs
+vitest.config.ts
+sonar-project.properties
+vercel.json
+*.log
+.DS_Store
+.env*

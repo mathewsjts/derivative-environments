@@ -83,8 +83,108 @@ permissions:
   pull-requests: read
 
 jobs:
+  # -------------------------------------------------------------------------
+  # QUEM PRECISA SER RECONSTRUIDO
+  #
+  # Este job existe separado, e SEM grupo de concorrencia, por um motivo que
+  # custou caro: enquanto a decisao morava dentro do job de reconstrucao, um
+  # evento irrelevante ainda assim reivindicava o grupo `rebuild-<env>` e o
+  # `cancel-in-progress` matava o run que estava fazendo o trabalho de verdade.
+  #
+  # Aconteceu assim: merge na main -> rebuild-env comeca a reconstruir os dois
+  # ambientes -> o sync-prs atualiza as branches dos PRs abertos -> cada push
+  # dispara um rebuild-env novo -> esses runs cancelam o da main e SO ENTAO
+  # descobrem que a branch deles nao esta em nenhum conjunto e encerram sem
+  # fazer nada. Resultado: dev e hom parados numa base antiga, com todos os
+  # workflows verdes.
+  #
+  # Com a decisao aqui fora, so quem vai realmente reconstruir entra na fila --
+  # e ai o cancel-in-progress volta a ser seguro, porque toda reconstrucao
+  # parte da main de agora e a mais nova de fato torna a anterior irrelevante.
+  #
+  # A matriz do job seguinte sai daqui. Lista vazia = nenhum job, e nao um job
+  # que nasce so para desistir.
+  # -------------------------------------------------------------------------
+  guard:
+    name: quais ambientes este evento afeta
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.decide.outputs.matrix }}
+      any: ${{ steps.decide.outputs.any }}
+
+    steps:
+      - name: Decidir
+        id: decide
+        env:
+          # Leitura apenas: o GITHUB_TOKEN padrao basta e evita cunhar um token
+          # de App so para responder uma pergunta.
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SELECTED: ${{ github.event.inputs.environment || 'ambos' }}
+          MAX_OVERRIDE: ${{ github.event.inputs.max_set || '' }}
+        run: |
+          set -euo pipefail
+
+          include='[]'
+
+          for entry in "dev:10:VERCEL_URL_DEV" "hom:5:VERCEL_URL_HOM"; do
+            env_name="${entry%%:*}"
+            rest="${entry#*:}"
+            max="${rest%%:*}"
+            url_key="${rest#*:}"
+            if [ -n "$MAX_OVERRIDE" ]; then max="$MAX_OVERRIDE"; fi
+
+            reason=""
+            wanted=false
+
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
+               && [ "$SELECTED" != "ambos" ] && [ "$SELECTED" != "$env_name" ]; then
+              reason="disparo manual pediu '$SELECTED'"
+            elif [ "${{ github.event_name }}" != "push" ]; then
+              wanted=true
+              reason="evento ${{ github.event_name }}: pode ter mudado o conjunto"
+            elif [ "${{ github.ref_name }}" = "main" ]; then
+              wanted=true
+              reason="push na main: a base mudou"
+            else
+              n=$(gh pr list --state open --base main --head "${{ github.ref_name }}" \
+                    --label "deploy:$env_name" --json number --jq 'length')
+              if [ "$n" -gt 0 ]; then
+                wanted=true
+                reason="a branch esta no conjunto"
+              else
+                reason="a branch nao esta no conjunto"
+              fi
+            fi
+
+            if [ "$wanted" = true ]; then
+              echo "  $env_name: RECONSTRUIR ($reason)"
+              include="$(jq -c --arg e "$env_name" --argjson m "$max" --arg u "$url_key" \
+                '. + [{env:$e, max:$m, urlKey:$u}]' <<<"$include")"
+            else
+              echo "  $env_name: pular ($reason)"
+            fi
+          done
+
+          any=$([ "$(jq 'length' <<<"$include")" -gt 0 ] && echo true || echo false)
+          echo "matrix=$(jq -c -n --argjson i "$include" '{include:$i}')" >> "$GITHUB_OUTPUT"
+          echo "any=$any" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Ambientes a reconstruir"
+            echo ""
+            if [ "$any" = true ]; then
+              jq -r '.[] | "- `\(.env)` (teto \(.max))"' <<<"$include"
+            else
+              echo "Nenhum. Este evento nao afeta nenhum ambiente."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
   rebuild:
     name: reconstruir ${{ matrix.env }}
+    needs: guard
+    if: needs.guard.outputs.any == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -92,25 +192,19 @@ jobs:
       # Um ambiente com problema nao pode impedir o outro de ser publicado --
       # e a mesma regra que aplicamos as branches dentro de um conjunto.
       fail-fast: false
-      matrix:
-        include:
-          - env: dev
-            max: 10
-            urlKey: VERCEL_URL_DEV
-          - env: hom
-            max: 5
-            urlKey: VERCEL_URL_HOM
+      # Matriz dinamica: so os ambientes que o guard aprovou.
+      matrix: ${{ fromJSON(needs.guard.outputs.matrix) }}
 
     # Por ambiente, nao global: reconstruir dev nao tem por que esperar hom.
-    # cancel-in-progress porque uma reconstrucao e sempre "do zero a partir da
-    # main de agora" -- a execucao mais nova torna a anterior irrelevante.
+    # cancel-in-progress e seguro AQUI porque so entram runs que vao reconstruir
+    # de fato, e toda reconstrucao parte da main de agora.
     concurrency:
       group: rebuild-${{ matrix.env }}
       cancel-in-progress: true
 
     env:
       ENV_NAME: ${{ matrix.env }}
-      MAX_SET: ${{ github.event.inputs.max_set != '' && github.event.inputs.max_set || matrix.max }}
+      MAX_SET: ${{ matrix.max }}
       STATE_FILE: ${{ github.workspace }}/../rebuild-state-${{ matrix.env }}.json
       ENV_URL: ${{ vars[matrix.urlKey] }}
 
@@ -156,48 +250,7 @@ jobs:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
 
-      # ---------------------------------------------------------------------
-      # Filtro barato: push numa branch que nao esta em nenhum conjunto deste
-      # ambiente nao muda o resultado da montagem. Continua stateless -- so
-      # pergunta ao GitHub se a branch importa para ESTE ambiente.
-      # ---------------------------------------------------------------------
-      - name: Este evento afeta ${{ matrix.env }}?
-        id: guard
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          GH_REPO: ${{ github.repository }}
-          SELECTED: ${{ github.event.inputs.environment || 'ambos' }}
-        run: |
-          set -euo pipefail
-
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
-             && [ "$SELECTED" != "ambos" ] && [ "$SELECTED" != "$ENV_NAME" ]; then
-            echo "Disparo manual pediu '$SELECTED'. Pulando $ENV_NAME."
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if [ "${{ github.event_name }}" != "push" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-
-          if [ "${{ github.ref_name }}" = "main" ]; then
-            echo "Push na main: a base mudou, os dois ambientes remontam."
-            echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-
-          n=$(gh pr list --state open --base main --head "${{ github.ref_name }}" \
-                --label "deploy:$ENV_NAME" --json number --jq 'length')
-          if [ "$n" -gt 0 ]; then
-            echo "Branch esta no conjunto de $ENV_NAME."
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Branch nao esta no conjunto de $ENV_NAME. Nada a fazer."
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Checkout
-        if: steps.guard.outputs.run == 'true'
         uses: actions/checkout@v4
         with:
           # Historico completo: a montagem faz merge de N branches.
@@ -226,7 +279,6 @@ jobs:
       # ---------------------------------------------------------------------
       - name: Carregar a logica de derivacao da main
         id: derive
-        if: steps.guard.outputs.run == 'true'
         run: |
           set -euo pipefail
           git fetch --quiet origin main
@@ -245,14 +297,12 @@ jobs:
       # ensaiar (ver DEMO.md, "se der errado ao vivo").
       # ---------------------------------------------------------------------
       - name: Montar o conjunto de ${{ matrix.env }}
-        if: steps.guard.outputs.run == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
         run: ${{ steps.derive.outputs.dir }}/assemble-env.sh
 
       - name: Resumo da montagem
-        if: steps.guard.outputs.run == 'true'
         id: state
         run: |
           set -euo pipefail
@@ -279,7 +329,7 @@ jobs:
       # que ficar um ciclo desatualizado.
       # ---------------------------------------------------------------------
       - name: docker build do conjunto montado
-        if: steps.guard.outputs.run == 'true' && steps.state.outputs.noop != 'true'
+        if: steps.state.outputs.noop != 'true'
         run: |
           start=$(date +%s)
           docker build --no-cache -t "derivative-environments:${ENV_NAME}" .
@@ -296,7 +346,7 @@ jobs:
       # tambem os workflows (fake-deploy.yml).
       # ---------------------------------------------------------------------
       - name: Publicar ${{ matrix.env }}
-        if: steps.guard.outputs.run == 'true' && steps.state.outputs.noop != 'true'
+        if: steps.state.outputs.noop != 'true'
         run: |
           set -euo pipefail
           lease="${{ steps.state.outputs.lease }}"
@@ -309,7 +359,7 @@ jobs:
           fi
 
       - name: Nada mudou
-        if: steps.guard.outputs.run == 'true' && steps.state.outputs.noop == 'true'
+        if: steps.state.outputs.noop == 'true'
         run: |
           echo "O conjunto montado tem o mesmo SHA que ja esta publicado em $ENV_NAME."
           echo "Sem docker build, sem push, sem redeploy. Idempotencia de verdade,"
@@ -323,7 +373,6 @@ jobs:
       # ambiente e no-op, mas o autor do PR precisa do comentario.
       # ---------------------------------------------------------------------
       - name: Notificar os PRs afetados
-        if: steps.guard.outputs.run == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}

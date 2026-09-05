@@ -71,7 +71,8 @@ build-manifest.json         escrito pelo job; a fonte de verdade do /version
 .github/scripts/
   assemble-env.sh           monta o conjunto (não publica — roda no laptop)
   notify.sh                 comenta só em transição de estado
-  test-assemble.sh          29 verificações de ponta a ponta, offline
+  test-assemble.sh          a montagem, de ponta a ponta, offline
+  test-workflows.sh         invariantes de concorrência dos workflows
 
 scripts/
   seed-demo.sh              cria o estado inicial da demo (idempotente)

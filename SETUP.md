@@ -53,7 +53,13 @@ aba Actions depois de uma reconstrução, o token está certo.
    |---|---|---|
    | Contents | **Read and write** | push com `--force-with-lease` em `dev` e `hom`, e a expiração diária em `env-resolutions` |
    | Pull requests | **Read and write** | comentar e aplicar/remover labels |
+   | Actions | **Read and write** | disparar o `rebuild-env` depois de expirar uma resolução (ver 3c) |
    | Metadata | Read-only | obrigatória, o GitHub adiciona sozinho |
+
+   > `Actions: write` só é usada pelo `label-ttl`. Sem ela a expiração continua
+   > funcionando — ela apaga a resolução e o push acontece —, mas os ambientes
+   > seguem com a resolução expirada até o próximo evento qualquer, e o job
+   > emite um `::warning::` dizendo isso. É degradação visível, não silenciosa.
 
 6. **Where can this GitHub App be installed?** → `Only on this account`
 7. **Create GitHub App**
@@ -366,6 +372,18 @@ Quem escreve nele:
 | pessoa | grava uma resolução | `publish-resolution.sh`, com `--force-with-lease` |
 | App | expira resoluções órfãs | `label-ttl.yml`, diário, também com lease |
 | `rebuild-env` | **nunca** | ele só lê — ver abaixo |
+
+**O push nesse ref não dispara workflow, e isso não é configuração faltando.**
+Em evento `push`, o GitHub Actions lê os workflows do **commit da branch que
+recebeu o push** — e este ref é órfão, carrega só `rr-cache/`, sem
+`.github/workflows/`. Não existe workflow ali para ser disparado.
+
+A alternativa seria ramificar o ref da `main` para ele carregar os workflows,
+mas aí ele deixa de ser um ref de dados e vira uma branch de código que ninguém
+sabe interpretar. Ficou o ref burro, e o disparo é explícito: tanto o
+`publish-resolution.sh` quanto o `label-ttl.yml` terminam com um
+`gh workflow run rebuild-env.yml -f environment=ambos`. É por isso que o App
+precisa de `Actions: write` (seção 1).
 
 O "nunca" é uma invariante testada (`test-workflows.sh`), e o motivo é concreto:
 com `rerere` ligado, o próprio job **grava preimages** dos conflitos que *não*

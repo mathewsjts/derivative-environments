@@ -263,7 +263,7 @@ git add src/routes/index.ts && git commit --no-edit
 
 > O que eu acabei de publicar não é um commit de código. É o `rr-cache` do
 > `git rerere` — a memória de "quando esse conflito exato aparecer, resolva
-> assim". O push nesse ref redispara a reconstrução sozinho.
+> assim". O script dispara a reconstrução no fim.
 
 **Mostrar:** `/version` de `hom` — agora **`main + a + b + c`**, `excluded`
 vazio, e um campo `resolutions` apontando para o ref. A feature de B traz

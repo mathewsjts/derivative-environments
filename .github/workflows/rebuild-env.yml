@@ -30,10 +30,13 @@ on:
     # laco infinito. A main NAO esta na lista de proposito: mergear na main e
     # justamente o que precisa redisparar a reconstrucao dos dois ambientes.
     #
-    # env-resolutions tambem NAO esta: gravar uma resolucao muda o resultado da
-    # montagem (uma branch que estava de fora passa a entrar), entao o push nela
-    # precisa reconstruir os dois ambientes -- senao a pessoa grava a resolucao
-    # e nao acontece nada ate o proximo evento qualquer.
+    # env-resolutions tambem nao esta na lista, mas por outro motivo, e vale
+    # dizer para ninguem procurar bug onde nao tem: em evento `push` o Actions
+    # le os workflows do COMMIT DA BRANCH QUE RECEBEU O PUSH, e aquele ref e
+    # orfao -- so rr-cache/, sem .github/workflows/. Nao existe workflow la para
+    # disparar. Quem dispara a reconstrucao depois de gravar ou expirar uma
+    # resolucao e um `gh workflow run` explicito, no publish-resolution.sh e no
+    # label-ttl.yml.
     branches-ignore: [dev, hom]
 
   # pull_request_target, e nao pull_request. A diferenca nao e cosmetica:
@@ -208,11 +211,21 @@ jobs:
                 wanted=true
                 reason="push na main: a base mudou"
               elif [ "$REF_NAME" = "$RESOLUTIONS_REF" ]; then
-                # Gravar (ou expirar) uma resolucao muda QUEM entra no conjunto,
-                # sem que nenhuma branch ou label tenha mudado. Os dois
-                # ambientes sao reconstruidos porque o ref nao diz a qual deles
-                # a resolucao se aplica -- ele e indexado por conflito, nao por
-                # ambiente. Quem nao usa nenhuma resolucao conclui no-op.
+                # NA PRATICA ESTE RAMO NAO E ALCANCADO HOJE, e ele fica aqui de
+                # proposito. O ref e orfao e nao carrega .github/workflows/,
+                # entao o push nele nao dispara workflow nenhum (ver o
+                # comentario do gatilho `push`). O disparo real e o
+                # `gh workflow run` do publish-resolution.sh e do label-ttl.yml.
+                #
+                # Ele fica porque a DECISAO esta certa e a forma do ref pode
+                # mudar: se alguem ramificar env-resolutions da main um dia, o
+                # evento passa a chegar e a resposta ja e a correta. Apagar
+                # significaria redescobrir, no palco, que gravar uma resolucao
+                # nao reconstroi nada.
+                #
+                # Os dois ambientes, porque o ref e indexado por CONFLITO e nao
+                # por ambiente: ele nao sabe a qual dos dois a resolucao se
+                # aplica. Quem nao usa nenhuma conclui no-op.
                 wanted=true
                 reason="push em $RESOLUTIONS_REF: as resolucoes gravadas mudaram"
               else

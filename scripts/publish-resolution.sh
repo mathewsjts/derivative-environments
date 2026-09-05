@@ -112,13 +112,31 @@ else
   git push "$ORIGIN_URL" "HEAD:refs/heads/$RESOLUTIONS_REF"
 fi
 
+# ---------------------------------------------------------------------------
+# O push NAO dispara workflow, e isso nao e configuracao faltando.
+#
+# Em evento `push`, o GitHub Actions le os workflows do COMMIT DA BRANCH QUE
+# RECEBEU O PUSH. Este ref e orfao e carrega so rr-cache/ -- nao ha
+# .github/workflows/ nele, entao nenhum workflow existe para ser disparado.
+#
+# A alternativa seria ramificar o ref da main para ele carregar os workflows,
+# mas ai ele deixa de ser um ref de dados e vira uma branch de codigo que
+# ninguem sabe interpretar. Melhor manter o ref burro e disparar na mao: quem
+# publica e uma pessoa, com gh na frente.
+# ---------------------------------------------------------------------------
+section "Disparando a reconstrucao"
+if gh workflow run rebuild-env.yml -f environment=ambos 2>/dev/null; then
+  log "rebuild-env disparado (dev e hom)"
+else
+  log "NAO consegui disparar. Rode: gh workflow run rebuild-env.yml -f environment=ambos"
+fi
+
 section "Publicado"
 cat <<EOF
   $RESOLUTIONS_REF @ $(git rev-parse --short HEAD)
 
-  O push nesse ref dispara o rebuild-env: os dois ambientes sao remontados e os
-  PRs que passarem a entrar por resolucao recebem o comentario explicando que a
-  resolucao NAO esta no PR deles.
+  Os dois ambientes sao remontados, e os PRs que passarem a entrar por resolucao
+  recebem o comentario explicando que a resolucao NAO esta no PR deles.
 
   A gravacao expira sozinha quando #$PR_A ou #$PR_B fechar (label-ttl.yml).
 EOF

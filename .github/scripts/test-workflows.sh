@@ -124,10 +124,12 @@ check "o filtro de blocked:* continua vindo antes de tudo" \
 # Resolucoes gravadas (git rerere). Duas invariantes, e as duas ja seriam bugs
 # silenciosos -- a familia de erro que este arquivo existe para pegar.
 #
-#   1. Gravar uma resolucao muda QUEM entra no conjunto sem que nenhuma branch
-#      ou label mude. Se o guard nao reconhecer o push nesse ref, a pessoa grava
-#      a resolucao, nada acontece, e o ambiente so muda no proximo evento
-#      qualquer -- sem erro em lugar nenhum.
+#   1. Gravar ou expirar uma resolucao muda QUEM entra no conjunto sem que
+#      nenhuma branch ou label mude -- e o push no ref NAO dispara nada, porque
+#      em evento `push` o Actions le os workflows da branch que recebeu o push e
+#      aquele ref e orfao, so com rr-cache/. Sem o `gh workflow run` explicito
+#      nos dois escritores, a pessoa grava a resolucao, nada acontece, e o
+#      ambiente so muda no proximo evento qualquer -- sem erro em lugar nenhum.
 #
 #   2. O ref e SOMENTE LEITURA para o job. Com rerere ligado, o proprio job
 #      grava preimages dos conflitos que NAO resolveu; se ele empurrasse o cache
@@ -141,8 +143,20 @@ echo "== resolucoes gravadas =="
 check "o nome do ref e definido uma vez so, no env do workflow" \
   "$(grep -c '^  RESOLUTIONS_REF: env-resolutions$' "$WF")" "1"
 
+# O ramo do guard fica (a decisao esta certa se a forma do ref mudar), mas quem
+# de fato dispara sao os dois escritores do ref. Testar so o guard daria falsa
+# seguranca -- foi exatamente o erro que este bloco existe para nao repetir.
 check "o guard reconhece push no ref de resolucoes" \
   "$(job_block guard | grep -c 'REF_NAME" = "\$RESOLUTIONS_REF"' || true)" "1"
+
+check "e o guard diz que esse ramo nao e alcancado hoje" \
+  "$(job_block guard | grep -c 'NA PRATICA ESTE RAMO NAO E ALCANCADO HOJE' || true)" "1"
+
+check "publish-resolution.sh dispara a reconstrucao explicitamente" \
+  "$(grep -cE '^if gh workflow run rebuild-env\.yml' scripts/publish-resolution.sh)" "1"
+
+check "e a expiracao do label-ttl tambem" \
+  "$(grep -c 'gh workflow run rebuild-env.yml' .github/workflows/label-ttl.yml)" "1"
 
 check "e o passo de montagem recebe o mesmo nome de ref" \
   "$(step_block "Montar o conjunto de \${{ matrix.env }}" | grep -c 'RESOLUTIONS_REF: \${{ env\.RESOLUTIONS_REF }}' || true)" "1"

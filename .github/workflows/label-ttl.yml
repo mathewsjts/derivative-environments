@@ -235,5 +235,12 @@ jobs:
           git push --force-with-lease="refs/heads/${RESOLUTIONS_REF}:${BEFORE_SHA}" \
                    "$URL" "HEAD:refs/heads/${RESOLUTIONS_REF}"
 
+          # Mesmo motivo do publish-resolution.sh: o ref e orfao e nao carrega
+          # .github/workflows/, e em `push` o Actions le os workflows da branch
+          # que RECEBEU o push. Nao existe workflow la para disparar, entao o
+          # disparo e explicito.
+          gh workflow run rebuild-env.yml -f environment=ambos \
+            || echo "::warning::Nao consegui disparar rebuild-env. Os ambientes seguem com a resolucao expirada ate o proximo evento."
+
           echo ""
-          echo "${REMOVED} removida(s), ${KEPT} mantida(s). O push redispara o rebuild-env."
+          echo "${REMOVED} removida(s), ${KEPT} mantida(s). rebuild-env disparado."

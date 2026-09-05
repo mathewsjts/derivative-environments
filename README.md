@@ -313,5 +313,5 @@ paralelo e conflitam:
 ```bash
 ./scripts/record-resolution.sh 1 2    # prepara o merge; voce resolve no editor
 git add src/routes/index.ts && git commit --no-edit
-./scripts/publish-resolution.sh 1 2   # publica no ref; o push redispara o rebuild
+./scripts/publish-resolution.sh 1 2   # publica no ref e dispara a reconstrucao
 ```

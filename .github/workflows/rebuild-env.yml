@@ -29,6 +29,11 @@ on:
     # dev e hom sao SAIDA deste job, nunca entrada -- ignorar as duas evita o
     # laco infinito. A main NAO esta na lista de proposito: mergear na main e
     # justamente o que precisa redisparar a reconstrucao dos dois ambientes.
+    #
+    # env-resolutions tambem NAO esta: gravar uma resolucao muda o resultado da
+    # montagem (uma branch que estava de fora passa a entrar), entao o push nela
+    # precisa reconstruir os dois ambientes -- senao a pessoa grava a resolucao
+    # e nao acontece nada ate o proximo evento qualquer.
     branches-ignore: [dev, hom]
 
   # pull_request_target, e nao pull_request. A diferenca nao e cosmetica:
@@ -81,6 +86,12 @@ on:
 permissions:
   contents: read
   pull-requests: read
+
+# Uma fonte so para o nome do ref: o guard decide por ele e o assemble-env.sh le
+# dele. Divergir os dois faria a gravacao de uma resolucao disparar a
+# reconstrucao de um ref que o script nao carrega -- ou o contrario.
+env:
+  RESOLUTIONS_REF: env-resolutions
 
 jobs:
   # -------------------------------------------------------------------------
@@ -149,6 +160,7 @@ jobs:
           # payload: nenhuma chamada de API a mais para descobrir.
           # Vazio em push e workflow_dispatch, que nao tem pull_request.
           PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          RESOLUTIONS_REF: ${{ env.RESOLUTIONS_REF }}
         run: |
           set -euo pipefail
 
@@ -195,6 +207,14 @@ jobs:
                 # A base mudou: os DOIS ambientes sao derivados dela.
                 wanted=true
                 reason="push na main: a base mudou"
+              elif [ "$REF_NAME" = "$RESOLUTIONS_REF" ]; then
+                # Gravar (ou expirar) uma resolucao muda QUEM entra no conjunto,
+                # sem que nenhuma branch ou label tenha mudado. Os dois
+                # ambientes sao reconstruidos porque o ref nao diz a qual deles
+                # a resolucao se aplica -- ele e indexado por conflito, nao por
+                # ambiente. Quem nao usa nenhuma resolucao conclui no-op.
+                wanted=true
+                reason="push em $RESOLUTIONS_REF: as resolucoes gravadas mudaram"
               else
                 n=$(gh pr list --state open --base main --head "$REF_NAME" \
                       --label "deploy:$env_name" --json number --jq 'length')
@@ -457,6 +477,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
+          RESOLUTIONS_REF: ${{ env.RESOLUTIONS_REF }}
         run: ${{ steps.derive.outputs.dir }}/assemble-env.sh
 
       - name: Resumo da montagem
@@ -472,8 +493,15 @@ jobs:
             echo ""
             echo "| | PR | branch | autor |"
             echo "|---|---|---|---|"
-            jq -r '.features[] | "| ✅ | #\(.pr) | `\(.branch)` | @\(.author) |"' "$STATE_FILE"
+            jq -r '.features[]
+                   | (if has("resolvedBy") then "⚠️" else "✅" end) as $i
+                   | "| \($i) | #\(.pr) | `\(.branch)` | @\(.author) |"' "$STATE_FILE"
             jq -r '.excluded[] | "| ⛔ | #\(.pr) | `\(.branch)` | @\(.author) |"' "$STATE_FILE"
+            if [ "$(jq -r '.resolutions // "null"' "$STATE_FILE")" != "null" ]; then
+              echo ""
+              echo "⚠️ = entrou por uma resolução gravada em \`$(jq -r '.resolutions.ref' "$STATE_FILE")\`"
+              echo "@ \`$(jq -r '.resolutions.sha[0:7]' "$STATE_FILE")\` — esse código não está em nenhum PR."
+            fi
             echo ""
             echo "- base \`main\` = \`$(jq -r '.base.sha' "$STATE_FILE")\`"
             echo "- HEAD de \`${ENV_NAME}\` = \`$(jq -r '.envHead' "$STATE_FILE")\`"

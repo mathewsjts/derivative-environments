@@ -12,6 +12,18 @@
 # review nao significam que o codigo esta vivo.
 #
 # Nao fecha PR, nao apaga branch, nao julga merito. So devolve a vaga.
+#
+# E A COLETA DE LIXO DAS RESOLUCOES GRAVADAS MORA AQUI TAMBEM
+#
+# Pela mesma razao e com a mesma forma: uma resolucao em env-resolutions e uma
+# reserva num recurso compartilhado (o conteudo do ambiente), e sem prazo ela
+# vira codigo orfao que ninguem sabe de onde veio. Ela morre quando qualquer um
+# dos dois PRs que ela reconcilia fecha -- momento em que ela deixou de ter
+# significado, porque o conflito que ela resolvia nao existe mais naquele par.
+#
+# E um PASSO do job que ja existe, e nao um job novo, por dinheiro: o GitHub
+# arredonda por job (ver perf/fewer-billed-jobs). Duas limpezas diarias que
+# rodam no mesmo horario e usam o mesmo token nao justificam dois minutos.
 # ---------------------------------------------------------------------------
 name: label-ttl
 
@@ -34,9 +46,14 @@ permissions:
   contents: read
   pull-requests: read
 
+env:
+  # Mesmo nome do rebuild-env.yml. Divergir faria a expiracao limpar um ref que
+  # o assemble-env.sh nao le -- e as resolucoes de verdade nunca expirarem.
+  RESOLUTIONS_REF: env-resolutions
+
 jobs:
   expire:
-    name: expirar labels deploy:*
+    name: expirar labels deploy:* e resolucoes orfas
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -116,3 +133,107 @@ jobs:
                 gh pr edit "$pr" --remove-label "$label"
               done
           done
+
+      # -------------------------------------------------------------------
+      # Resolucoes gravadas cujo par ja nao esta mais aberto.
+      #
+      # Uma resolucao vale para UM par de PRs. Fechado ou mergeado um dos dois,
+      # ela nao tem mais o que reconciliar: ou o conflito virou conflito com a
+      # main (e ai o trabalho e humano, uma vez, no PR), ou sumiu.
+      #
+      # Deixar a entrada la nao produziria merge errado -- o id do conflito e o
+      # hash do preimage, entao ela simplesmente nunca mais casaria. O problema
+      # e outro: o ref vira um cemiterio onde ninguem consegue mais dizer quais
+      # resolucoes estao vivas, e a pergunta "que codigo esta em hom que nao
+      # esta em PR nenhum?" deixa de ter resposta curta.
+      #
+      # dry_run vale aqui tambem: nada e removido, so listado.
+      # -------------------------------------------------------------------
+      - name: Expirar resolucoes orfas
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          TOKEN: ${{ steps.app-token.outputs.token }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: |
+          set -euo pipefail
+
+          WORK="$(mktemp -d)"; cd "$WORK"
+          git init --quiet -b "$RESOLUTIONS_REF" .
+          git config user.name derivative-env-bot
+          git config user.email derivative-env-bot@users.noreply.github.com
+
+          URL="https://x-access-token:${TOKEN}@github.com/${GH_REPO}.git"
+          if ! git fetch --quiet "$URL" "refs/heads/${RESOLUTIONS_REF}" 2>/dev/null; then
+            echo "Nenhum ref ${RESOLUTIONS_REF}: nada a expirar."
+            exit 0
+          fi
+          git reset --quiet --hard FETCH_HEAD
+          BEFORE_SHA="$(git rev-parse FETCH_HEAD)"
+
+          if [ ! -d rr-cache ]; then
+            echo "Ref existe mas nao tem rr-cache. Nada a fazer."
+            exit 0
+          fi
+
+          OPEN="$(gh pr list --state open --limit 200 --json number --jq '[.[].number]')"
+          REMOVED=0
+          KEPT=0
+
+          {
+            echo "### 🧹 Resolucoes gravadas"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          for d in rr-cache/*/; do
+            [ -d "$d" ] || continue
+            id="$(basename "$d")"
+
+            # Sem meta.json nao da para saber a quem a resolucao pertence.
+            # Mantemos: apagar o que nao entendemos e pior do que guardar.
+            if [ ! -f "$d/meta.json" ]; then
+              echo "  mantem  ${id:0:12} (sem meta.json)"
+              KEPT=$((KEPT + 1))
+              continue
+            fi
+
+            prs="$(jq -c '.prs' "$d/meta.json")"
+            closed="$(jq -r --argjson open "$OPEN" \
+              '[.[] | select(. as $p | $open | index($p) | not)] | join(", ")' <<<"$prs")"
+
+            if [ -z "$closed" ]; then
+              echo "  mantem  ${id:0:12} (PRs $(jq -r 'join(", ")' <<<"$prs") abertos)"
+              KEPT=$((KEPT + 1))
+              echo "| ✅ | \`${id:0:12}\` | PRs $(jq -r 'join(", ")' <<<"$prs") | ativos |" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+
+            echo "  EXPIRA  ${id:0:12} (PR(s) fechado(s): $closed)"
+            echo "| ⏳ | \`${id:0:12}\` | PRs $(jq -r 'join(", ")' <<<"$prs") | #$closed fechado |" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$DRY_RUN" != "true" ]; then
+              rm -rf "$d"
+              REMOVED=$((REMOVED + 1))
+            fi
+          done
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo ""
+            echo "dry-run: nada removido."
+            exit 0
+          fi
+
+          if [ "$REMOVED" -eq 0 ]; then
+            echo ""
+            echo "${KEPT} resolucao(oes) viva(s), nenhuma a expirar."
+            exit 0
+          fi
+
+          git add -A
+          git commit --quiet -m "rerere: expirar ${REMOVED} resolucao(oes) orfa(s)"
+          # Lease contra o SHA que buscamos: se alguem gravou uma resolucao
+          # entre o fetch e agora, o push falha em vez de apagar o trabalho.
+          git push --force-with-lease="refs/heads/${RESOLUTIONS_REF}:${BEFORE_SHA}" \
+                   "$URL" "HEAD:refs/heads/${RESOLUTIONS_REF}"
+
+          echo ""
+          echo "${REMOVED} removida(s), ${KEPT} mantida(s). O push redispara o rebuild-env."

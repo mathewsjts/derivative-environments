@@ -254,6 +254,18 @@ a fazer — e os ambientes ficavam parados numa base antiga, com todos os
 workflows verdes. A decisão virou um job próprio, sem grupo, que emite a matriz
 do job seguinte: lista vazia, nenhum job.
 
+**E a rajada é colapsada antes da fila, não dentro dela.** `cancel-in-progress`
+dispara na hora, mas quem é superado *antes* de rodar o primeiro passo continua
+ocupando a fila até o GitHub recolher o job — e isso leva o timeout de
+cancelamento inteiro, cinco minutos. Medido aqui: o run #225 segurou
+`rebuild-dev` por **301 segundos sem executar um único passo**, para um trabalho
+que leva 22. Por isso o job de decisão tem uma **janela de acomodação** de 25s:
+ele espera, e se já existe uma execução mais nova aberta, desiste *antes* de
+entrar na fila. Esperar ali é de graça — o job não tem grupo, então ninguém
+espera por ele, e o Actions arredonda por job para o minuto. Quem fica
+reconstrói os **dois** ambientes: quem desistiu podia ser o único que queria um
+deles, e errar para o lado estreito é o parágrafo acima de novo.
+
 **A notificação usa label como estado.** `blocked:<env>` é a única memória do
 sistema. Sem ela, um job que roda a cada push transformaria um conflito de meio
 dia em quarenta comentários.

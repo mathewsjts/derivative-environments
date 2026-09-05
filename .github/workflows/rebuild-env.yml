@@ -89,6 +89,12 @@ on:
 permissions:
   contents: read
   pull-requests: read
+  # A janela de acomodacao pergunta "existe run mais novo aberto?". Declarar o
+  # bloco `permissions` poe em `none` tudo que nao esta listado, entao sem esta
+  # linha a consulta responde 403 -- e a janela FALHA ABERTO, ou seja, todo run
+  # segue em frente e a rajada volta a colapsar dentro da fila. Nada fica
+  # vermelho: some so o ganho. Por isso ela e invariante em test-workflows.sh.
+  actions: read
 
 # Uma fonte so para o nome do ref: o guard decide por ele e o assemble-env.sh le
 # dele. Divergir os dois faria a gravacao de uma resolucao disparar a
@@ -135,8 +141,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      matrix: ${{ steps.decide.outputs.matrix }}
-      any: ${{ steps.decide.outputs.any }}
+      # A janela de acomodacao roda DEPOIS do decide e pode anular ou alargar a
+      # decisao dele. Quando ela nao roda -- porque o decide ja disse que nenhum
+      # ambiente muda --, a expressao cai no decide, que e a resposta certa.
+      matrix: ${{ steps.settle.outputs.matrix || steps.decide.outputs.matrix }}
+      any: ${{ steps.settle.outputs.any || steps.decide.outputs.any }}
 
     steps:
       - name: Decidir
@@ -189,6 +198,11 @@ jobs:
           esac
 
           include='[]'
+          # O conjunto completo, independente do evento. Nao e desperdicio: e o
+          # insumo do alargamento da janela de acomodacao logo abaixo -- quando
+          # este run supera outros, ele passa a responder por eles e nao tem como
+          # saber o que eles queriam.
+          all='[]'
           skipped=()
 
           for entry in "dev:10:VERCEL_URL_DEV" "hom:5:VERCEL_URL_HOM"; do
@@ -197,6 +211,9 @@ jobs:
             max="${rest%%:*}"
             url_key="${rest#*:}"
             if [ -n "$MAX_OVERRIDE" ]; then max="$MAX_OVERRIDE"; fi
+
+            all="$(jq -c --arg e "$env_name" --argjson m "$max" --arg u "$url_key" \
+              '. + [{env:$e, max:$m, urlKey:$u}]' <<<"$all")"
 
             reason=""
             wanted=false
@@ -290,6 +307,7 @@ jobs:
 
           any=$([ "$(jq 'length' <<<"$include")" -gt 0 ] && echo true || echo false)
           echo "matrix=$(jq -c -n --argjson i "$include" '{include:$i}')" >> "$GITHUB_OUTPUT"
+          echo "matrixAll=$(jq -c -n --argjson i "$all" '{include:$i}')" >> "$GITHUB_OUTPUT"
           echo "any=$any" >> "$GITHUB_OUTPUT"
 
           {
@@ -311,6 +329,114 @@ jobs:
               done
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # ---------------------------------------------------------------------
+      # JANELA DE ACOMODACAO -- e por que ela fica AQUI, no job SEM grupo.
+      #
+      # `cancel-in-progress` dispara na hora, mas quem e superado ANTES de rodar
+      # o primeiro passo continua ocupando a fila enquanto o GitHub recolhe o
+      # job -- e isso leva o timeout de cancelamento inteiro, cinco minutos.
+      # Medido neste repositorio, nao deduzido:
+      #
+      #   run #225  reconstruir dev  cancelled  301s  ZERO passos executados
+      #   run #188  reconstruir dev  cancelled  300s  ZERO passos executados
+      #   job que de fato reconstroi:            22s  em media, 30s no pior caso
+      #
+      # Numa rajada de 9 runs em 30 segundos, `rebuild-dev` passou 5 minutos
+      # esperando um job vazio ser recolhido para publicar um trabalho de 26s.
+      #
+      # A causa nao e o cancelamento: e ONDE a rajada e colapsada. Ela colapsava
+      # DENTRO do grupo `rebuild-<env>`, e esperar la custa esse recolhimento.
+      # Aqui fora nao custa nada -- o guard nao tem grupo, entao ninguem espera
+      # por ele, e o Actions arredonda por JOB para o minuto: um guard de 5s e um
+      # de 30s custam o mesmo 1 minuto faturado. A janela e literalmente de
+      # graca.
+      #
+      # A REGRA: o run mais novo vence. Ele reconstroi a partir da main de agora
+      # com as labels de agora, entao subsome os anteriores por construcao -- e a
+      # mesma condicao 2 do grupo (ver o comentario do job `rebuild`), aplicada
+      # uma camada acima, onde a espera nao cobra pedagio.
+      #
+      # E O ALARGAMENTO, que nao e detalhe: quem desiste pode ser o unico que
+      # queria um ambiente. Run A quer so `dev` (deploy:dev); run B, mais novo,
+      # quer so `hom`. Se A desiste e B mantem a decisao estreita dele, `dev`
+      # fica sem a label do A e nada redispara -- o bug do PR #11 entrando por
+      # esta porta. Entao quem supera alguem passa a responder por ele e
+      # reconstroi os DOIS ambientes. Errar para o lado largo custa um job no-op
+      # de ~9s; errar para o lado estreito custa um ambiente parado com todos os
+      # workflows verdes.
+      #
+      # E ela FALHA ABERTO de proposito: se a consulta a API nao responder, o run
+      # segue com a decisao original. Reconstrucao redundante e barata; nao
+      # reconstruir e a falha silenciosa que este repositorio inteiro existe para
+      # evitar.
+      # ---------------------------------------------------------------------
+      - name: Janela de acomodacao
+        id: settle
+        # Nada a acomodar se o decide ja disse que nenhum ambiente muda. Sem este
+        # `if`, todo evento irrelevante pagaria a janela para nada.
+        if: steps.decide.outputs.any == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_NUMBER: ${{ github.run_number }}
+          MATRIX: ${{ steps.decide.outputs.matrix }}
+          MATRIX_ALL: ${{ steps.decide.outputs.matrixAll }}
+          # Maior que a rajada tipica (9 runs em 30s, no caso medido) e muito
+          # menor que os 5 minutos que custa colapsar dentro do grupo.
+          SETTLE_SECONDS: "25"
+        run: |
+          set -euo pipefail
+
+          echo "Acomodando por ${SETTLE_SECONDS}s antes de reivindicar a fila."
+          sleep "$SETTLE_SECONDS"
+
+          # `conclusion == null` = ainda em queued ou in_progress. O proprio run
+          # aparece nessa lista, e as comparacoes com RUN_NUMBER o excluem.
+          if ! open="$(gh api \
+                 "repos/${GH_REPO}/actions/workflows/rebuild-env.yml/runs?per_page=100" \
+                 --jq '[.workflow_runs[] | select(.conclusion == null) | .run_number]')"; then
+            echo "::warning::Nao consegui listar os runs abertos do rebuild-env."
+            echo "Seguindo com a decisao original: redundante e melhor que parado."
+            open='[]'
+          fi
+
+          newer="$(jq --argjson me "$RUN_NUMBER" '[.[] | select(. > $me)] | length' <<<"$open")"
+          older="$(jq --argjson me "$RUN_NUMBER" '[.[] | select(. < $me)] | length' <<<"$open")"
+          echo "Runs abertos: $newer mais novo(s), $older mais antigo(s) que o #${RUN_NUMBER}."
+
+          if [ "$newer" -gt 0 ]; then
+            echo "Desistindo antes da fila: o mais novo reconstroi de uma main mais recente."
+            echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
+            echo "any=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Janela de acomodacao"
+              echo ""
+              echo "Nenhum ambiente. Ha **${newer} run(s) mais novo(s)** de \`rebuild-env\` ainda"
+              echo "abertos, e cada um reconstroi da \`main\` de agora com as labels de agora."
+              echo "Este run desiste **antes** de entrar na fila -- e a fila que custa caro."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if [ "$older" -gt 0 ]; then
+            echo "Sou o mais novo e superei $older run(s): alargando para todos os ambientes."
+            echo "matrix=$MATRIX_ALL" >> "$GITHUB_OUTPUT"
+            echo "any=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Janela de acomodacao"
+              echo ""
+              echo "**Alargado para todos os ambientes.** Este run superou **${older} run(s)**"
+              echo "mais antigo(s) e nao tem como saber quais ambientes eles queriam. Responder"
+              echo "por eles custa um job no-op; nao responder deixa um ambiente parado com"
+              echo "todos os workflows verdes."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "Nenhum outro run aberto: a decisao do passo anterior vale como esta."
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "any=true" >> "$GITHUB_OUTPUT"
 
   # -------------------------------------------------------------------------
   # UM JOB POR AMBIENTE -- e o grupo de concorrencia junto com ele.

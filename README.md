@@ -61,7 +61,7 @@ src/routes/version.ts       GET /version: o conjunto que está no ar
 build-manifest.json         escrito pelo job; a fonte de verdade do /version
 
 .github/workflows/
-  pr-gates.yml              typecheck, lint, testes, audit, docker, Sonar, sincronia
+  pr-gates.yml              typecheck, lint, testes, audit, docker, Sonar — no PR e na main
   rebuild-env.yml           o job que deriva dev e hom da main
   sync-prs.yml              atualiza os PRs abertos quando a main anda
   label-ttl.yml             devolve a vaga de PR parado

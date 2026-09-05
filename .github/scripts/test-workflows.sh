@@ -25,6 +25,7 @@ set -uo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 WF=.github/workflows/rebuild-env.yml
+PRWF=.github/workflows/pr-gates.yml
 
 PASS=0
 FAIL=0
@@ -38,12 +39,13 @@ check() {
 }
 
 # O bloco de um job = da linha "  <id>:" ate a proxima linha "  <id>:".
+# Segundo argumento opcional: o workflow (padrao, o rebuild-env).
 job_block() {
   awk -v alvo="  $1:" '
     $0 == alvo { dentro = 1; next }
     dentro && /^  [a-zA-Z_-]+:$/ { exit }
     dentro { print }
-  ' "$WF"
+  ' "${2:-$WF}"
 }
 
 echo "== concorrencia do rebuild-env =="
@@ -88,6 +90,53 @@ check "a logica de derivacao e carregada de origin/main" \
 
 check "nenhum push --force sem lease em nenhum workflow" \
   "$(grep -rhoE 'git push [^|&;]*--force(\s|$)' .github/workflows/ | grep -vc 'force-with-lease' || true)" "0"
+
+# ---------------------------------------------------------------------------
+# pr-gates: a main passou a ter CI, e com ela um evento onde
+# `github.event.pull_request.number` e VAZIO.
+#
+# O grupo antigo (`pr-gates-${{ ...number }}`) viraria o mesmo `pr-gates-` para
+# todo merge na main: o segundo merge cancelaria o CI do primeiro, e o commit
+# cancelado nao seria reavaliado por ninguem. E a terceira porta de entrada do
+# mesmo bug dos PRs #10 e #11 -- trabalho cancelado que ninguem refaz.
+#
+# A regra continua sendo uma so: o grupo e o RECURSO protegido. Em PR o recurso
+# e o PR (push novo subsome o anterior, cancelar e seguro); em push na main o
+# recurso e o COMMIT, e um merge nao subsome o anterior.
+# ---------------------------------------------------------------------------
+echo
+echo "== concorrencia do pr-gates =="
+
+check "os gates rodam tambem em push na main" \
+  "$(awk '/^  push:$/ {n++} END {print n + 0}' "$PRWF")" "1"
+
+check "o grupo distingue push de PR (fallback para github.sha)" \
+  "$(grep -c 'group: pr-gates-\${{ github\.event\.pull_request\.number || github\.sha }}' "$PRWF")" "1"
+
+check "cancel-in-progress condicionado ao evento" \
+  "$(grep -c "cancel-in-progress: \${{ github.event_name == 'pull_request' }}" "$PRWF")" "1"
+
+check "nenhum cancel-in-progress incondicional (cancelaria o CI da main)" \
+  "$(grep -c 'cancel-in-progress: true' "$PRWF")" "0"
+
+check "o gate de sincronia nao roda em push (nao existe refs/pull/N/head)" \
+  "$(grep -c "if: \${{ !cancelled() && github.event_name == 'pull_request' }}" "$PRWF")" "1"
+
+# ---------------------------------------------------------------------------
+# Os nomes sao contrato com o ruleset "main protegida", que exige status check
+# POR NOME. Renomear um job faz o contexto exigido nunca mais reportar, e todo
+# PR aberto trava para sempre esperando um check que nao existe. Nao e um bug
+# silencioso como os de cima -- e o oposto, um bug barulhento demais -- mas o
+# custo de errar e o mesmo repositorio parado.
+# ---------------------------------------------------------------------------
+echo
+echo "== contrato de nome com o ruleset =="
+
+check "o job de gates continua se chamando 'gates do PR'" \
+  "$(grep -c '^    name: gates do PR$' "$PRWF")" "1"
+
+check "o job do Sonar continua se chamando 'SonarCloud'" \
+  "$(grep -c '^    name: SonarCloud$' "$PRWF")" "1"
 
 echo
 printf '\033[1m%s ok, %s falha(s)\033[0m\n' "$PASS" "$FAIL"

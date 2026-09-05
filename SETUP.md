@@ -4,8 +4,9 @@ Este arquivo lista o que **não dá para automatizar de dentro do repositório**
 criação de app, chaves privadas, proteção de branch e integrações externas.
 Tudo aqui exige uma decisão sua ou uma credencial que só você tem.
 
-Ordem recomendada: 1 → 2 → 3 → 4 → 5. O passo 3 depende de as branches `dev` e
-`hom` já existirem, o que acontece na primeira execução do `rebuild-env`.
+Ordem recomendada: 1 → 2 → 3 → 4 → 5 → 6. O passo 3 depende de as branches
+`dev` e `hom` já existirem, o que acontece na primeira execução do
+`rebuild-env`. O passo 6 só importa no dia da apresentação.
 
 Substitua `<OWNER>/<REPO>` por `mathewsjts/derivative-environments` (ou deixe o
 `gh` inferir, se estiver dentro do repo).
@@ -369,11 +370,37 @@ depende: quem empurra `dev`/`hom` é o job.
 
 ---
 
-## 6. Checklist antes da demo
+## 6. `ENABLE_FAKE_DEPLOY` — ligue antes da demo
+
+O `fake-deploy.yml` é o workflow que **prova ao vivo** que push feito por
+GitHub App dispara workflows (§1). Ele roda a cada push em `dev`/`hom`, que é o
+desfecho normal de quase todo evento do modelo: 36 jobs de ~5 segundos, ou seja
+36 minutos faturados para 3 minutos de computação real — o GitHub arredonda por
+job.
+
+Fora da apresentação ele não verifica nada que já não esteja verificado. Por
+isso ele fica **desligado por padrão** e só roda quando a variável de
+repositório `ENABLE_FAKE_DEPLOY` valer exatamente `true`. Job pulado não é
+faturado.
+
+```bash
+gh variable set ENABLE_FAKE_DEPLOY --body true     # antes da demo
+gh variable set ENABLE_FAKE_DEPLOY --body false    # depois
+```
+
+> ⚠️ **O bloco 2 do DEMO.md depende dela.** É lá que você mostra o
+> `fake-deploy` tendo rodado logo depois da reconstrução — o item que prova que
+> o token está certo. Com a variável desligada o job aparece como *skipped*, e o
+> argumento fica sem o que apontar na tela. Ligue no T-10, junto com o resto da
+> preparação, e confirme com `gh variable list`.
+
+---
+
+## 7. Checklist antes da demo
 
 ```bash
 gh secret list        # APP_ID, APP_PRIVATE_KEY, SONAR_TOKEN
-gh variable list      # VERCEL_URL_DEV, VERCEL_URL_HOM
+gh variable list      # VERCEL_URL_DEV, VERCEL_URL_HOM, ENABLE_FAKE_DEPLOY=true
 gh label list         # deploy:dev, deploy:hom, blocked:dev, blocked:hom
 gh ruleset list       # 2 rulesets ativos
 

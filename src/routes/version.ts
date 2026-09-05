@@ -1,6 +1,6 @@
 import { Router } from 'express';
 
-import { loadManifest, summarize } from '../manifest';
+import { loadManifest, resolvedFeatures, summarize } from '../manifest';
 
 export const versionRouter = Router();
 
@@ -27,5 +27,11 @@ versionRouter.get('/', (_req, res) => {
     featureCount: manifest.features.length,
     features: manifest.features,
     excluded: manifest.excluded,
+    // De onde saiu o codigo que nao esta em nenhum PR. Sem isso, uma feature
+    // que so esta no ar por causa de uma resolucao gravada parece igual a
+    // qualquer outra -- e a plateia nao tem como saber que aquele merge foi
+    // escrito por alguem e nao pelo git.
+    resolutions: manifest.resolutions ?? null,
+    resolvedCount: resolvedFeatures(manifest).length,
   });
 });

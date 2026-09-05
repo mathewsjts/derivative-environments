@@ -48,6 +48,17 @@ job_block() {
   ' "${2:-$WF}"
 }
 
+# O bloco de um passo = da linha "      - name: <nome>" ate o proximo passo
+# (ou o fim do job).
+step_block() {
+  awk -v alvo="      - name: $1" '
+    $0 == alvo { dentro = 1; next }
+    dentro && /^      - name:/ { exit }
+    dentro && /^  [a-zA-Z_-]+:$/ { exit }
+    dentro { print }
+  ' "${2:-$WF}"
+}
+
 echo "== concorrencia do rebuild-env =="
 
 check "o workflow NAO tem grupo de concorrencia global" \
@@ -121,6 +132,29 @@ check "nenhum cancel-in-progress incondicional (cancelaria o CI da main)" \
 
 check "o gate de sincronia nao roda em push (nao existe refs/pull/N/head)" \
   "$(grep -c "if: \${{ !cancelled() && github.event_name == 'pull_request' }}" "$PRWF")" "1"
+
+# ---------------------------------------------------------------------------
+# `sincronia com a main` e um PASSO do job `gates do PR`, que e contexto exigido
+# pelo ruleset. Se ele reprovar, uma branch atras da main trava o merge -- ou
+# seja, o `strict` de volta pela porta dos fundos, e na versao "fotografada":
+# bloqueia conforme o ultimo push do PR viu e nao percebe a main andando depois.
+#
+# A decisao esta escrita em SETUP.md, secao 3b: prevencao O(N x PRs abertos)
+# trocada pela deteccao O(1) dos gates rodando na propria main. Este bloco
+# existe para que reintroduzir meia-strict aqui custe um teste vermelho, e nao
+# uma descoberta em producao.
+# ---------------------------------------------------------------------------
+echo
+echo "== sincronia com a main avisa, nao reprova =="
+
+check "emite ::warning" \
+  "$(step_block "sincronia com a main" "$PRWF" | grep -c '::warning title=Branch desatualizada' || true)" "1"
+
+check "nao emite ::error" \
+  "$(step_block "sincronia com a main" "$PRWF" | grep -c '::error' || true)" "0"
+
+check "nao sai com codigo de erro" \
+  "$(step_block "sincronia com a main" "$PRWF" | grep -cE '^ *exit 1$' || true)" "0"
 
 # ---------------------------------------------------------------------------
 # Os nomes sao contrato com o ruleset "main protegida", que exige status check

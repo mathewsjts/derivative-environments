@@ -253,13 +253,17 @@ acompanhou, e **ninguém rebaseou nada à mão**. E não conseguiu atualizar o d
 > segue. É a mesma regra nos dois lugares, e é o único ponto do processo onde
 > uma pessoa precisa entrar.
 
-**Mostrar:** o PR #2 de B, agora marcado como **out-of-date** pelo GitHub — o
-merge está bloqueado porque a `main` andou. (O job `sincronia com a main` diz a
-mesma coisa com uma mensagem explicando o rebase, mas ele só re-executa no
-próximo push da branch; quem percebe a `main` andando é a regra do ruleset.)
+**Mostrar:** o PR #2 de B. O GitHub agora diz que ele **tem conflito com a
+base** — e isso, sim, bloqueia o merge. E no último run dos gates, o passo
+`sincronia com a main` com o ⚠️ e a mensagem explicando o rebase.
 
-> Agora o gate diz para B o que fazer, e a diferença é toda: o conflito de B
-> não é mais contra a branch especulativa de alguém. É contra código real,
+> Repare em duas coisas separadas. Estar **atrás** da `main` não bloqueia nada
+> aqui: o `strict` está desligado de propósito, e quem pega uma `main` quebrada
+> é o próprio CI rodando na `main` depois do merge. O que bloqueia é o
+> **conflito**, que é uma afirmação sobre o código, não sobre a data da branch.
+>
+> E o aviso diz para B o que fazer, com a diferença que interessa: o conflito
+> de B não é mais contra a branch especulativa de alguém. É contra código real,
 > revisado e mergeado. Resolver agora é resolver **uma vez**.
 
 **Fazer — resolução à mão, no palco:**

@@ -102,15 +102,24 @@ jobs:
   # e ai o cancel-in-progress volta a ser seguro, porque toda reconstrucao
   # parte da main de agora e a mais nova de fato torna a anterior irrelevante.
   #
-  # A matriz do job seguinte sai daqui. Lista vazia = nenhum job, e nao um job
-  # que nasce so para desistir.
+  # A lista de ambientes do job seguinte sai daqui. Lista vazia = nenhum job,
+  # e nao um job que nasce so para desistir.
+  #
+  # E a lista e o mais curta possivel. O evento diz o que mudou, entao da para
+  # nao reconstruir o que nao mudou:
+  #
+  #   labeled/unlabeled  -> so o ambiente da label. deploy:hom nao mexe em dev.
+  #   closed/reopened    -> os dois: o PR pode estar nos dois conjuntos.
+  #   push na main       -> os dois: a base mudou.
+  #   push numa feature  -> so os ambientes cujo conjunto contem a branch.
+  #   workflow_dispatch  -> o que o input `environment` pedir.
   # -------------------------------------------------------------------------
   guard:
     name: quais ambientes este evento afeta
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      matrix: ${{ steps.decide.outputs.matrix }}
+      targets: ${{ steps.decide.outputs.targets }}
       any: ${{ steps.decide.outputs.any }}
 
     steps:
@@ -121,12 +130,43 @@ jobs:
           # de App so para responder uma pergunta.
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          # Tudo que a decisao le entra por env, e nao interpolado no meio do
+          # script: assim da para extrair este bloco e roda-lo no laptop
+          # trocando so as variaveis. Ja pegou bug.
+          EVENT_NAME: ${{ github.event_name }}
+          # labeled | unlabeled | closed | reopened. Vazio em push e em
+          # workflow_dispatch, que nao tem `action`.
+          EVENT_ACTION: ${{ github.event.action || '' }}
+          REF_NAME: ${{ github.ref_name }}
           SELECTED: ${{ github.event.inputs.environment || 'ambos' }}
           MAX_OVERRIDE: ${{ github.event.inputs.max_set || '' }}
+          CHANGED_LABEL: ${{ github.event.label.name || '' }}
         run: |
           set -euo pipefail
 
+          # A label blocked:<env> e aplicada e removida pelo PROPRIO notify.sh.
+          # Sem este filtro, cada conflito custa uma reconstrucao inteira a mais:
+          # o job marca o PR -> o `labeled` dispara outro rebuild -> ele monta o
+          # mesmo conjunto, conclui no-op e encerra. Nao e laco infinito (o
+          # segundo run nao mexe em label nenhuma), mas e um ciclo de docker
+          # build jogado fora a cada transicao de estado.
+          case "${CHANGED_LABEL:-}" in
+            blocked:*)
+              echo "Label '$CHANGED_LABEL' e a marca de estado do proprio job. Ignorando."
+              echo 'targets=[]' >> "$GITHUB_OUTPUT"
+              echo "any=false" >> "$GITHUB_OUTPUT"
+              {
+                echo "### Ambientes a reconstruir"
+                echo ""
+                echo "Nenhum. O evento foi a label \`$CHANGED_LABEL\`, que e a marca de"
+                echo "estado escrita por este mesmo workflow."
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+              ;;
+          esac
+
           include='[]'
+          skipped=()
 
           for entry in "dev:10:VERCEL_URL_DEV" "hom:5:VERCEL_URL_HOM"; do
             env_name="${entry%%:*}"
@@ -138,24 +178,47 @@ jobs:
             reason=""
             wanted=false
 
-            if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
+            if [ "$EVENT_NAME" = "workflow_dispatch" ] \
                && [ "$SELECTED" != "ambos" ] && [ "$SELECTED" != "$env_name" ]; then
               reason="disparo manual pediu '$SELECTED'"
-            elif [ "${{ github.event_name }}" != "push" ]; then
-              wanted=true
-              reason="evento ${{ github.event_name }}: pode ter mudado o conjunto"
-            elif [ "${{ github.ref_name }}" = "main" ]; then
-              wanted=true
-              reason="push na main: a base mudou"
-            else
-              n=$(gh pr list --state open --base main --head "${{ github.ref_name }}" \
-                    --label "deploy:$env_name" --json number --jq 'length')
-              if [ "$n" -gt 0 ]; then
+
+            elif [ "$EVENT_NAME" = "push" ]; then
+              if [ "$REF_NAME" = "main" ]; then
+                # A base mudou: os DOIS ambientes sao derivados dela.
                 wanted=true
-                reason="a branch esta no conjunto"
+                reason="push na main: a base mudou"
               else
-                reason="a branch nao esta no conjunto"
+                n=$(gh pr list --state open --base main --head "$REF_NAME" \
+                      --label "deploy:$env_name" --json number --jq 'length')
+                if [ "$n" -gt 0 ]; then
+                  wanted=true
+                  reason="a branch esta no conjunto"
+                else
+                  reason="a branch nao esta no conjunto"
+                fi
               fi
+
+            elif [ "$EVENT_ACTION" = "labeled" ] || [ "$EVENT_ACTION" = "unlabeled" ]; then
+              # Uma label mexe no conjunto de UM ambiente so. Aplicar deploy:hom
+              # reconstruia dev tambem, para concluir no-op depois de montar o
+              # conjunto inteiro -- trabalho e minuto faturado por nada.
+              #
+              # Qualquer outra label (blocked:*, que o filtro acima ja pegou, ou
+              # uma label de processo como `bug`) nao entra em conjunto nenhum:
+              # nenhum ambiente precisa ser reconstruido.
+              if [ "$CHANGED_LABEL" = "deploy:$env_name" ]; then
+                wanted=true
+                reason="a label $CHANGED_LABEL mudou o conjunto deste ambiente"
+              else
+                reason="a label '$CHANGED_LABEL' nao muda o conjunto de $env_name"
+              fi
+
+            else
+              # closed / reopened: o PR pode estar nos dois conjuntos, e o evento
+              # nao diz em quais. Reconstroi os dois.
+              # Tambem cai aqui o workflow_dispatch que pediu este ambiente.
+              wanted=true
+              reason="evento $EVENT_NAME${EVENT_ACTION:+/$EVENT_ACTION}: pode ter mudado o conjunto"
             fi
 
             if [ "$wanted" = true ]; then
@@ -164,11 +227,12 @@ jobs:
                 '. + [{env:$e, max:$m, urlKey:$u}]' <<<"$include")"
             else
               echo "  $env_name: pular ($reason)"
+              skipped+=("$env_name|$reason")
             fi
           done
 
           any=$([ "$(jq 'length' <<<"$include")" -gt 0 ] && echo true || echo false)
-          echo "matrix=$(jq -c -n --argjson i "$include" '{include:$i}')" >> "$GITHUB_OUTPUT"
+          echo "targets=$include" >> "$GITHUB_OUTPUT"
           echo "any=$any" >> "$GITHUB_OUTPUT"
 
           {
@@ -179,34 +243,61 @@ jobs:
             else
               echo "Nenhum. Este evento nao afeta nenhum ambiente."
             fi
+            # Dizer por que um ambiente ficou de fora e o que evita a pergunta
+            # "por que hom nao reconstruiu?" virar investigacao.
+            if [ "${#skipped[@]}" -gt 0 ]; then
+              echo ""
+              echo "Fora desta reconstrucao:"
+              echo ""
+              for s in "${skipped[@]}"; do
+                printf -- '- `%s`: %s\n' "${s%%|*}" "${s#*|}"
+              done
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # -------------------------------------------------------------------------
+  # A RECONSTRUCAO, NUM JOB SO
+  #
+  # Antes existia um job por ambiente (strategy.matrix vinda do guard). Era
+  # bonito no diagrama e caro na fatura: o GitHub arredonda por JOB, entao dois
+  # jobs de 23s custam 2 minutos, e numa rajada de labels a maioria deles nasce
+  # so para ser cancelada -- ja tendo custado o minuto minimo.
+  #
+  # Agora um job so itera sobre os ambientes que o guard aprovou. dev e hom
+  # deixam de reconstruir em paralelo (o relogio de parede vai de ~23s para
+  # ~50s), e a fatura cai pela metade nesta etapa.
+  #
+  # O que NAO mudou, e por que:
+  #   - A decisao continua fora daqui (job `guard`, sem concorrencia). Mover a
+  #     concorrencia para o nivel do workflow reintroduziria o bug do PR #10.
+  #   - Um ambiente com problema nao impede o outro de subir. Antes isso era o
+  #     `fail-fast: false` da matriz; agora e o subshell do loop -- cada
+  #     ambiente falha por conta propria e o job so reprova no fim.
+  # -------------------------------------------------------------------------
   rebuild:
-    name: reconstruir ${{ matrix.env }}
+    name: reconstruir os ambientes
     needs: guard
+    # Sem trabalho, sem job. Esta condicao e o que mantem o `cancel-in-progress`
+    # abaixo seguro: quem entra na fila e sempre quem vai reconstruir de fato.
     if: needs.guard.outputs.any == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Dois ambientes em serie no mesmo job: o teto dobra junto.
+    timeout-minutes: 20
 
-    strategy:
-      # Um ambiente com problema nao pode impedir o outro de ser publicado --
-      # e a mesma regra que aplicamos as branches dentro de um conjunto.
-      fail-fast: false
-      # Matriz dinamica: so os ambientes que o guard aprovou.
-      matrix: ${{ fromJSON(needs.guard.outputs.matrix) }}
-
-    # Por ambiente, nao global: reconstruir dev nao tem por que esperar hom.
-    # cancel-in-progress e seguro AQUI porque so entram runs que vao reconstruir
-    # de fato, e toda reconstrucao parte da main de agora.
+    # Grupo unico, no JOB e nao no workflow. No nivel do workflow o `guard`
+    # entraria na fila junto e um run que nao vai fazer nada cancelaria o run
+    # que esta trabalhando -- exatamente o bug corrigido no PR #10.
     concurrency:
-      group: rebuild-${{ matrix.env }}
+      group: rebuild-env
       cancel-in-progress: true
 
     env:
-      ENV_NAME: ${{ matrix.env }}
-      MAX_SET: ${{ matrix.max }}
-      STATE_FILE: ${{ github.workspace }}/../rebuild-state-${{ matrix.env }}.json
-      ENV_URL: ${{ vars[matrix.urlKey] }}
+      TARGETS: ${{ needs.guard.outputs.targets }}
+      # As duas URLs entram como variaveis de ambiente porque, sem matriz, nao
+      # existe `vars[matrix.urlKey]`: a escolha passou a ser feita no bash, por
+      # expansao indireta do `urlKey` que o guard emitiu.
+      VERCEL_URL_DEV: ${{ vars.VERCEL_URL_DEV }}
+      VERCEL_URL_HOM: ${{ vars.VERCEL_URL_HOM }}
 
     steps:
       # ---------------------------------------------------------------------
@@ -279,6 +370,9 @@ jobs:
       # ---------------------------------------------------------------------
       - name: Carregar a logica de derivacao da main
         id: derive
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           git fetch --quiet origin main
@@ -290,90 +384,124 @@ jobs:
           done
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
           echo "Derivando com os scripts de origin/main ($(git rev-parse --short origin/main))."
-          echo "Ref que disparou: ${{ github.ref_name }} @ ${{ github.sha }}"
+          echo "Ref que disparou: $REF_NAME @ $REF_SHA"
 
       # ---------------------------------------------------------------------
-      # A montagem. O script nao publica nada -- da para roda-lo no laptop para
-      # ensaiar (ver DEMO.md, "se der errado ao vivo").
+      # UM passo por execucao, N ambientes dentro dele.
+      #
+      # Cada ambiente roda num SUBSHELL com `set -e` proprio. Isso substitui o
+      # `fail-fast: false` da matriz antiga: um `docker build` que reprova o
+      # conjunto de `dev` aborta o subshell de `dev` -- sem publicar, sem
+      # notificar -- e o loop segue para `hom`. O job so reprova no fim, dizendo
+      # quais ambientes falharam.
+      #
+      # (O subshell nao pode ficar dentro de `if (...)` nem antes de `||`: nesse
+      # contexto o bash desliga o `errexit` do subshell inteiro. Por isso ele e
+      # um comando solto e o status e lido em seguida, em `$?`.)
+      #
+      # A ordem dentro de cada ambiente e a mesma de antes:
+      #   montar -> resumo -> docker build (gate) -> push -> notificar
       # ---------------------------------------------------------------------
-      - name: Montar o conjunto de ${{ matrix.env }}
+      - name: Reconstruir os ambientes aprovados pelo guard
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
-        run: ${{ steps.derive.outputs.dir }}/assemble-env.sh
-
-      - name: Resumo da montagem
-        id: state
+          # `steps` nao existe no env do job -- so no do step.
+          DERIVE_DIR: ${{ steps.derive.outputs.dir }}
         run: |
-          set -euo pipefail
-          echo "noop=$(jq -r '.noop' "$STATE_FILE")" >> "$GITHUB_OUTPUT"
-          echo "head=$(jq -r '.envHead' "$STATE_FILE")" >> "$GITHUB_OUTPUT"
-          echo "lease=$(jq -r '.remoteHead // ""' "$STATE_FILE")" >> "$GITHUB_OUTPUT"
+          # O shell padrao do Actions ja roda com -e. Aqui ele ATRAPALHA: a falha
+          # de um ambiente abortaria o passo antes de tentar o proximo, que e
+          # exatamente o que o `fail-fast: false` da matriz antiga impedia. O
+          # errexit vive dentro do subshell de cada ambiente, e so la.
+          set +e
+          set -uo pipefail
 
-          {
-            echo "## \`${ENV_NAME}\` = $(jq -r '[.base.branch] + [.features[].branch] | join(" + ")' "$STATE_FILE")"
-            echo ""
-            echo "| | PR | branch | autor |"
-            echo "|---|---|---|---|"
-            jq -r '.features[] | "| ✅ | #\(.pr) | `\(.branch)` | @\(.author) |"' "$STATE_FILE"
-            jq -r '.excluded[] | "| ⛔ | #\(.pr) | `\(.branch)` | @\(.author) |"' "$STATE_FILE"
-            echo ""
-            echo "- base \`main\` = \`$(jq -r '.base.sha' "$STATE_FILE")\`"
-            echo "- HEAD de \`${ENV_NAME}\` = \`$(jq -r '.envHead' "$STATE_FILE")\`"
-            echo "- no-op (conjunto identico ao que ja esta publicado): \`$(jq -r '.noop' "$STATE_FILE")\`"
-          } >> "$GITHUB_STEP_SUMMARY"
+          failed=""
 
-      # ---------------------------------------------------------------------
-      # Gate antes de publicar. Se o CONJUNTO montado nao builda, o ambiente
-      # anterior continua no ar -- publicar um conjunto quebrado seria pior do
-      # que ficar um ciclo desatualizado.
-      # ---------------------------------------------------------------------
-      - name: docker build do conjunto montado
-        if: steps.state.outputs.noop != 'true'
-        run: |
-          start=$(date +%s)
-          docker build --no-cache -t "derivative-environments:${ENV_NAME}" .
-          echo "docker build levou $(( $(date +%s) - start ))s"
+          while read -r target; do
+            [ -n "$target" ] || continue
 
-      # ---------------------------------------------------------------------
-      # Publicacao.
-      #
-      # --force-with-lease com o SHA esperado explicito: se alguem (ou outra
-      # execucao) mexeu na branch depois da nossa leitura, o push falha em vez
-      # de sobrescrever. --force puro nunca.
-      #
-      # E o push que dispara o deploy -- feito pelo App, portanto dispara
-      # tambem os workflows (fake-deploy.yml).
-      # ---------------------------------------------------------------------
-      - name: Publicar ${{ matrix.env }}
-        if: steps.state.outputs.noop != 'true'
-        run: |
-          set -euo pipefail
-          lease="${{ steps.state.outputs.lease }}"
-          if [ -z "$lease" ]; then
-            echo "Branch $ENV_NAME ainda nao existe no remoto: push simples."
-            git push origin "HEAD:refs/heads/$ENV_NAME"
-          else
-            git push --force-with-lease="refs/heads/$ENV_NAME:$lease" \
-                     origin "HEAD:refs/heads/$ENV_NAME"
+            env_name="$(jq -r '.env' <<<"$target")"
+            max_set="$(jq -r '.max' <<<"$target")"
+            url_key="$(jq -r '.urlKey' <<<"$target")"
+
+            echo "::group::reconstruir $env_name"
+            (
+              set -euo pipefail
+
+              # STATE_FILE fica FORA do workspace de proposito: a montagem faz
+              # checkout/reset na arvore o tempo todo e um arquivo de estado
+              # dentro dela seria arrastado junto.
+              export ENV_NAME="$env_name"
+              export MAX_SET="$max_set"
+              export STATE_FILE="$GITHUB_WORKSPACE/../rebuild-state-$env_name.json"
+              export ENV_URL="${!url_key:-}"
+
+              "$DERIVE_DIR/assemble-env.sh"
+
+              noop="$(jq -r '.noop' "$STATE_FILE")"
+              lease="$(jq -r '.remoteHead // ""' "$STATE_FILE")"
+
+              {
+                echo "## \`${ENV_NAME}\` = $(jq -r '[.base.branch] + [.features[].branch] | join(" + ")' "$STATE_FILE")"
+                echo ""
+                echo "| | PR | branch | autor |"
+                echo "|---|---|---|---|"
+                jq -r '.features[] | "| ✅ | #\(.pr) | `\(.branch)` | @\(.author) |"' "$STATE_FILE"
+                jq -r '.excluded[] | "| ⛔ | #\(.pr) | `\(.branch)` | @\(.author) |"' "$STATE_FILE"
+                echo ""
+                echo "- base \`main\` = \`$(jq -r '.base.sha' "$STATE_FILE")\`"
+                echo "- HEAD de \`${ENV_NAME}\` = \`$(jq -r '.envHead' "$STATE_FILE")\`"
+                echo "- no-op (conjunto identico ao que ja esta publicado): \`${noop}\`"
+              } >> "$GITHUB_STEP_SUMMARY"
+
+              if [ "$noop" = "true" ]; then
+                echo "O conjunto montado tem o mesmo SHA que ja esta publicado em $ENV_NAME."
+                echo "Sem docker build, sem push, sem redeploy. Idempotencia de verdade,"
+                echo "nao 'resultado parecido'."
+              else
+                # Gate antes de publicar. Se o CONJUNTO montado nao builda, o
+                # ambiente anterior continua no ar -- publicar um conjunto
+                # quebrado seria pior do que ficar um ciclo desatualizado.
+                start=$(date +%s)
+                docker build --no-cache -t "derivative-environments:${ENV_NAME}" .
+                echo "docker build levou $(( $(date +%s) - start ))s"
+
+                # --force-with-lease com o SHA esperado explicito: se alguem (ou
+                # outra execucao) mexeu na branch depois da nossa leitura, o push
+                # falha em vez de sobrescrever. --force puro nunca.
+                if [ -z "$lease" ]; then
+                  echo "Branch $ENV_NAME ainda nao existe no remoto: push simples."
+                  git push origin "HEAD:refs/heads/$ENV_NAME"
+                else
+                  git push --force-with-lease="refs/heads/$ENV_NAME:$lease" \
+                           origin "HEAD:refs/heads/$ENV_NAME"
+                fi
+              fi
+
+              # Notificacao SEMPRE que o ambiente foi montado -- inclusive no
+              # no-op. Nao e detalhe: um PR pode entrar em conflito sem que o
+              # conjunto publicado mude (o ambiente ja tinha exatamente as mesmas
+              # features). O ambiente e no-op, mas o autor do PR precisa do
+              # comentario.
+              "$DERIVE_DIR/notify.sh"
+            )
+            status=$?
+            echo "::endgroup::"
+
+            if [ "$status" -ne 0 ]; then
+              echo "::error title=Falha em $env_name::A reconstrucao de '$env_name' terminou com status $status."
+              failed="$failed $env_name"
+            else
+              echo "$env_name: ok"
+            fi
+          done < <(jq -c '.[]' <<<"$TARGETS")
+
+          if [ -n "$failed" ]; then
+            {
+              echo ""
+              echo "> ⛔ Falhou em:$failed. Os demais ambientes foram publicados normalmente."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "Ambientes com falha:$failed"
+            exit 1
           fi
-
-      - name: Nada mudou
-        if: steps.state.outputs.noop == 'true'
-        run: |
-          echo "O conjunto montado tem o mesmo SHA que ja esta publicado em $ENV_NAME."
-          echo "Sem docker build, sem push, sem redeploy. Idempotencia de verdade,"
-          echo "nao 'resultado parecido'."
-
-      # ---------------------------------------------------------------------
-      # Notificacao SEMPRE que o job rodou -- inclusive no no-op.
-      #
-      # Nao e detalhe: um PR pode entrar em conflito sem que o conjunto
-      # publicado mude (o ambiente ja tinha exatamente as mesmas features). O
-      # ambiente e no-op, mas o autor do PR precisa do comentario.
-      # ---------------------------------------------------------------------
-      - name: Notificar os PRs afetados
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          GH_REPO: ${{ github.repository }}
-        run: ${{ steps.derive.outputs.dir }}/notify.sh

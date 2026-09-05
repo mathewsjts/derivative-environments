@@ -4,8 +4,9 @@ Este arquivo lista o que **não dá para automatizar de dentro do repositório**
 criação de app, chaves privadas, proteção de branch e integrações externas.
 Tudo aqui exige uma decisão sua ou uma credencial que só você tem.
 
-Ordem recomendada: 1 → 2 → 3 → 4 → 5. O passo 3 depende de as branches `dev` e
-`hom` já existirem, o que acontece na primeira execução do `rebuild-env`.
+Ordem recomendada: 1 → 2 → 3 → 4 → 5 → 6. O passo 3 depende de as branches
+`dev` e `hom` já existirem, o que acontece na primeira execução do
+`rebuild-env`. O passo 6 só importa no dia da apresentação.
 
 Substitua `<OWNER>/<REPO>` por `mathewsjts/derivative-environments` (ou deixe o
 `gh` inferir, se estiver dentro do repo).
@@ -176,11 +177,8 @@ gh api -X POST repos/<OWNER>/<REPO>/rulesets \
       "parameters": {
         "strict_required_status_checks_policy": true,
         "required_status_checks": [
-          { "context": "typecheck / lint / testes" },
-          { "context": "npm audit (producao)" },
-          { "context": "docker build (gate)" },
-          { "context": "SonarCloud" },
-          { "context": "sincronia com a main" }
+          { "context": "gates do PR" },
+          { "context": "SonarCloud" }
         ]
       }
     }
@@ -188,6 +186,32 @@ gh api -X POST repos/<OWNER>/<REPO>/rulesets \
 }
 JSON
 ```
+
+> ### ⚠️ Se este ruleset já existe, a ordem importa
+>
+> O ruleset exige status checks **por nome**. Até o `pr-gates.yml` deste PR
+> chegar na `main`, os nomes que reportam são os cinco antigos:
+>
+> ```
+> typecheck / lint / testes
+> npm audit (producao)
+> docker build (gate)
+> SonarCloud
+> sincronia com a main
+> ```
+>
+> Depois do merge passam a ser dois: `gates do PR` e `SonarCloud`. Contexto
+> exigido que nunca reporta **nunca fica verde** — se o ruleset for atualizado
+> na ordem errada, todo PR aberto trava esperando um check que não existe mais,
+> inclusive o PR que faz a mudança.
+>
+> **Atualize o ruleset imediatamente antes de mergear**, com os dois nomes
+> novos. Enquanto os workflows antigos ainda estiverem na `main`, `gates do PR`
+> fica pendente — por isso é "imediatamente antes", e não "com antecedência".
+>
+> Pelo browser: **Settings → Rules → `main protegida` → Require status checks**.
+> Ou, com os dois nomes de uma vez, via API — ver o bloco de comando logo
+> abaixo de "Migrar os status checks exigidos".
 
 **As duas camadas de sincronia são complementares, não redundantes.** O job
 `sincronia com a main` roda em evento de PR — ou seja, ele é um *retrato do
@@ -205,6 +229,49 @@ A divisão fica assim:
 Se você já criou o ruleset com `strict` desligado, ligue em
 **Settings → Rules → `main protegida` → Require branches to be up to date before
 merging**.
+
+### Migrar os status checks exigidos
+
+Troca os cinco contextos antigos pelos dois novos **sem recriar o ruleset** —
+recriar perderia `bypass_actors` e as outras regras. Rode **imediatamente antes
+de mergear** o PR que junta os jobs do `pr-gates`:
+
+```bash
+OWNER_REPO=mathewsjts/derivative-environments
+
+# 1. Achar o ruleset pelo nome
+RULESET_ID=$(gh api "repos/$OWNER_REPO/rulesets" \
+  --jq '.[] | select(.name == "main protegida") | .id')
+echo "ruleset: $RULESET_ID"
+
+# 2. Baixar inteiro e trocar SO a lista de contextos
+gh api "repos/$OWNER_REPO/rulesets/$RULESET_ID" > /tmp/ruleset.json
+
+jq '{name, target, enforcement, conditions, bypass_actors,
+     rules: [ .rules[]
+              | if .type == "required_status_checks"
+                then .parameters.required_status_checks =
+                     [ { "context": "gates do PR" }, { "context": "SonarCloud" } ]
+                else . end ]}' /tmp/ruleset.json > /tmp/ruleset-novo.json
+
+# 3. Conferir o corpo ANTES de enviar
+jq -r '.rules[] | select(.type == "required_status_checks") | .parameters
+       | "strict: \(.strict_required_status_checks_policy)",
+         "contextos: \([.required_status_checks[].context] | join(" | "))"' \
+  /tmp/ruleset-novo.json
+
+# 4. Enviar
+gh api -X PUT "repos/$OWNER_REPO/rulesets/$RULESET_ID" --input /tmp/ruleset-novo.json
+```
+
+> `--input` com o JSON inteiro, e não `-F rules=@arquivo`: `-F` mandaria a lista
+> de regras como **string** e o ruleset ficaria inválido.
+
+> **Confira o `strict` no passo 3.** O texto acima explica por que ele deve estar
+> `true`; se o passo 3 imprimir `strict: false`, o ruleset ativo diverge do que
+> este arquivo documenta e o `sync-prs` está trabalhando sem que nada obrigue o
+> PR a estar em dia. É uma decisão sua, e este comando **preserva** o valor que
+> estiver lá — não o corrige sozinho.
 
 > Ligar o `strict` sem automação transformaria cada push na `main` numa rodada
 > de rebase manual. O workflow `sync-prs.yml` cobre isso: a cada push na `main`
@@ -303,11 +370,37 @@ depende: quem empurra `dev`/`hom` é o job.
 
 ---
 
-## 6. Checklist antes da demo
+## 6. `ENABLE_FAKE_DEPLOY` — ligue antes da demo
+
+O `fake-deploy.yml` é o workflow que **prova ao vivo** que push feito por
+GitHub App dispara workflows (§1). Ele roda a cada push em `dev`/`hom`, que é o
+desfecho normal de quase todo evento do modelo: 36 jobs de ~5 segundos, ou seja
+36 minutos faturados para 3 minutos de computação real — o GitHub arredonda por
+job.
+
+Fora da apresentação ele não verifica nada que já não esteja verificado. Por
+isso ele fica **desligado por padrão** e só roda quando a variável de
+repositório `ENABLE_FAKE_DEPLOY` valer exatamente `true`. Job pulado não é
+faturado.
+
+```bash
+gh variable set ENABLE_FAKE_DEPLOY --body true     # antes da demo
+gh variable set ENABLE_FAKE_DEPLOY --body false    # depois
+```
+
+> ⚠️ **O bloco 2 do DEMO.md depende dela.** É lá que você mostra o
+> `fake-deploy` tendo rodado logo depois da reconstrução — o item que prova que
+> o token está certo. Com a variável desligada o job aparece como *skipped*, e o
+> argumento fica sem o que apontar na tela. Ligue no T-10, junto com o resto da
+> preparação, e confirme com `gh variable list`.
+
+---
+
+## 7. Checklist antes da demo
 
 ```bash
 gh secret list        # APP_ID, APP_PRIVATE_KEY, SONAR_TOKEN
-gh variable list      # VERCEL_URL_DEV, VERCEL_URL_HOM
+gh variable list      # VERCEL_URL_DEV, VERCEL_URL_HOM, ENABLE_FAKE_DEPLOY=true
 gh label list         # deploy:dev, deploy:hom, blocked:dev, blocked:hom
 gh ruleset list       # 2 rulesets ativos
 

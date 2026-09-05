@@ -143,6 +143,18 @@ conflitar. Ele atualiza com o *Update branch* nativo (merge, sem force-push) e,
 em conflito, **pula e segue** — resolver conflito contra a `main` é trabalho
 humano, feito uma vez, no PR.
 
+**E ele só atualiza os PRs marcados com `deploy:*`.** Atualizar todo PR aberto
+transforma um merge na `main` numa rajada: cada atualização é um push, e cada
+push dispara os gates e uma reconstrução. Com 30 PRs abertos, um merge vira ~30
+runs extras — a amplificação cresce com o número de PRs abertos, não com o
+tamanho do time, e é a mais perigosa deste desenho em escala real. Os três
+motivos acima só são urgentes para quem está dentro de um ambiente ou prestes a
+mergear; para o resto, estar atrasado é inofensivo, justamente porque a
+montagem parte da `main`. Um PR sem label que ganhar uma depois é atualizado no
+próximo push na `main` — ou na hora, pelo *Update branch* do próprio PR. Para o
+comportamento antigo, o workflow aceita `only_labeled` desmarcado no disparo
+manual.
+
 **Quem decide se há trabalho fica fora da fila de concorrência.** O
 `rebuild-env` usa `cancel-in-progress` por ambiente — uma reconstrução parte
 sempre da `main` de agora, então a execução mais nova torna a anterior

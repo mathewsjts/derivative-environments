@@ -69,6 +69,44 @@ if [ "$RESET" = true ]; then
   for env_name in dev hom; do
     git push --quiet origin --delete "$env_name" >/dev/null 2>&1 && log "ambiente $env_name apagado" || true
   done
+
+  # -------------------------------------------------------------------------
+  # Resolucoes gravadas.
+  #
+  # Fechar e recriar os PRs nao limpa isto: o rr-cache e indexado pelo CONTEUDO
+  # do conflito, nao pelo numero do PR. Como o seed recria as branches com
+  # exatamente as mesmas insercoes, o conflito reproduzido tem o MESMO preimage
+  # -- e uma gravacao de um ensaio anterior voltaria a se aplicar sozinha, com
+  # os PRs novos. A demo comecaria com B ja dentro de hom, e o bloco 3 (o
+  # conflito) simplesmente nao aconteceria.
+  #
+  # Tres lugares, porque o estado mora em tres lugares:
+  #   remoto   o ref env-resolutions
+  #   local    o rr-cache do clone de quem gravou
+  #   config   rerere.enabled/autoUpdate, escritos pelo record-resolution.sh e
+  #            pelo assemble-env.sh quando alguem ensaia a montagem no laptop
+  # -------------------------------------------------------------------------
+  RESOLUTIONS_REF="${RESOLUTIONS_REF:-env-resolutions}"
+  git push --quiet origin --delete "$RESOLUTIONS_REF" >/dev/null 2>&1 \
+    && log "ref $RESOLUTIONS_REF apagado" || true
+
+  RR_CACHE="$(git rev-parse --absolute-git-dir)/rr-cache"
+  if [ -d "$RR_CACHE" ]; then
+    rm -rf "$RR_CACHE"
+    log "rr-cache local apagado"
+  fi
+
+  # As branches de trabalho que o record-resolution.sh cria (rr/<a>-<b>).
+  while read -r b; do
+    [ -n "$b" ] || continue
+    git branch -D "$b" >/dev/null 2>&1 && log "branch de trabalho $b apagada" || true
+  done < <(git for-each-ref --format='%(refname:short)' 'refs/heads/rr/*')
+
+  if [ -n "$(git config --local --get rerere.enabled || true)" ]; then
+    git config --local --unset-all rerere.enabled || true
+    git config --local --unset-all rerere.autoUpdate || true
+    log "config local de rerere removida"
+  fi
 fi
 
 # ---------------------------------------------------------------------------

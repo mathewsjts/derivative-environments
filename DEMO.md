@@ -551,16 +551,19 @@ apaga branch: só devolve as vagas.
 ### Uma resolução gravada ficou de um ensaio anterior
 
 Sintoma: B entra em `hom` sem você ter feito nada, e o `/version` traz um campo
-`resolutions`. É o `env-resolutions` de um ensaio que não foi limpo.
+`resolutions`. É o `env-resolutions` de um ensaio que não foi limpo — e note que
+**fechar os PRs e recriar as branches não resolve**, porque a chave da gravação é
+o conteúdo do conflito, não o PR.
 
 ```bash
 git ls-remote origin refs/heads/env-resolutions   # existe?
-git push origin --delete env-resolutions          # zera
+git push origin --delete env-resolutions          # zera o remoto
+rm -rf "$(git rev-parse --absolute-git-dir)/rr-cache"   # e o cache local
 gh workflow run rebuild-env.yml -f environment=hom
 ```
 
 O ambiente volta ao **mesmo SHA** de antes da gravação — não há resíduo em
-branch, label ou manifesto.
+branch, label ou manifesto. O `seed-demo.sh --reset` já faz os três passos.
 
 ### Um PR ficou com `blocked:hom` de um ensaio anterior
 
@@ -589,8 +592,18 @@ reconstruir na mão nem limpar mais nada.
 ./scripts/seed-demo.sh
 ```
 
-Fecha os PRs, apaga as branches de feature e os ambientes, e recria tudo. Leva
-cerca de um minuto contando a primeira reconstrução.
+Fecha os PRs, apaga as branches de feature e os ambientes, apaga as resoluções
+gravadas, e recria tudo. Leva cerca de um minuto contando a primeira
+reconstrução.
+
+> **Por que a resolução precisa ser apagada explicitamente**, se os PRs foram
+> fechados e as branches recriadas: o `rr-cache` é indexado pelo **conteúdo** do
+> conflito, não pelo número do PR. O seed recria as branches com exatamente as
+> mesmas inserções, então o conflito reproduzido tem o **mesmo** preimage — e uma
+> gravação de um ensaio anterior volta a se aplicar sozinha, nos PRs novos.
+> Verificado: mesmas branches recriadas do zero, SHAs e PRs diferentes, mesma
+> chave `b03c075d…`. Sem essa limpeza a demo começaria com B já dentro de `hom`
+> e o bloco 3 — o conflito — simplesmente não aconteceria.
 
 ### Nada funciona e o tempo está acabando
 

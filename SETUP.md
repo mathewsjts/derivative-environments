@@ -175,7 +175,7 @@ gh api -X POST repos/<OWNER>/<REPO>/rulesets \
     {
       "type": "required_status_checks",
       "parameters": {
-        "strict_required_status_checks_policy": true,
+        "strict_required_status_checks_policy": false,
         "required_status_checks": [
           { "context": "gates do PR" },
           { "context": "SonarCloud" }
@@ -213,22 +213,59 @@ JSON
 > Ou, com os dois nomes de uma vez, via API — ver o bloco de comando logo
 > abaixo de "Migrar os status checks exigidos".
 
-**As duas camadas de sincronia são complementares, não redundantes.** O job
-`sincronia com a main` roda em evento de PR — ou seja, ele é um *retrato do
-momento do último push*. Quando a `main` anda depois disso, ele não re-executa e
-continua verde, mesmo com o PR já desatualizado. Quem enxerga isso
-continuamente é o `strict_required_status_checks_policy`, por isso ele fica
-**ligado**.
+### O `strict` fica **desligado**, e isso é uma decisão
 
-A divisão fica assim:
+`"strict_required_status_checks_policy": false` acima não é descuido. É a
+escolha, e ela tem um custo — que fica escrito aqui justamente para ninguém
+"consertar" o valor sem saber o que está desfazendo.
 
-- **GitHub (`strict`)** — percebe que a `main` andou e bloqueia o merge.
-- **Job `sincronia com a main`** — quando roda, explica *o que fazer* e por quê,
-  em vez de só marcar o PR como out-of-date.
+`strict` quer dizer *a branch precisa estar atualizada com a `main` para
+mergear*. O que ele compra é **prevenção**: nenhum PR entra sem ter sido
+validado contra a `main` exata que vai recebê-lo. O que ele cobra é **O(N)**:
+cada push na `main` invalida os N PRs abertos de uma vez, e cada um precisa de
+uma atualização — que é um push, que dispara os gates e uma reconstrução de
+ambiente. Com 30 PRs abertos, um merge vira ~30 rodadas de CI. A conta cresce
+com o número de PRs abertos, não com o tamanho do time.
 
-Se você já criou o ruleset com `strict` desligado, ligue em
-**Settings → Rules → `main protegida` → Require branches to be up to date before
-merging**.
+E o que a `main` precisa não é que todo PR esteja em dia com ela. É **saber em
+~60 segundos quando alguma coisa quebrou** — e isso ela não tinha: até este PR
+não existia CI nenhum na `main`, porque o `pr-gates.yml` só rodava em
+`pull_request`. O único sinal pós-merge era o `docker build` do `rebuild-env`,
+que apenas compila (o Dockerfile instala `typescript` e mais nada, sem `vitest`
+e sem `eslint`, de propósito).
+
+| | custo por merge | o que garante |
+|---|---|---|
+| prevenção — `strict` ligado | O(N × PRs abertos) | nenhum PR mergeia desatualizado |
+| detecção — gates na `main` | O(1): 2 jobs | `main` quebrada aparece em ~60s |
+
+**O que a escolha custa, dito explicitamente.** Existe uma janela: um PR pode
+mergear tendo sido validado contra uma `main` anterior. Dois PRs verdes
+separados podem produzir uma `main` vermelha — conflito **semântico**, não
+textual: o git mergeia limpo e o teste quebra. Quando isso acontecer, o preço é
+**um PR de correção**, aberto por quem viu o `gates do PR` vermelho na `main`
+um minuto depois do merge. O preço da outra coluna era pagar ~30 rodadas de CI
+em todo merge para comprar essa janela — e, do jeito que estava montado aqui,
+sem sequer comprá-la (ver o parágrafo seguinte).
+
+**Meia-`strict` é pior que nenhuma.** O job `sincronia com a main` roda em
+evento de PR: ele é um *retrato do momento do último push*. Quando a `main`
+anda depois disso, ele não re-executa e continua verde, com o PR já
+desatualizado. Enquanto ele era um passo capaz de reprovar o `gates do PR` —
+que é contexto exigido pelo ruleset — o efeito era travar o merge conforme o
+último push viu, sem garantir nada continuamente, e ainda pagando o `sync-prs`.
+Por isso ele virou **aviso**: continua rodando e continua explicando o rebase
+(é a mensagem que o bloco 5 do DEMO usa), mas não derruba mais o job. Ver o
+comentário dele em [pr-gates.yml](.github/workflows/pr-gates.yml).
+
+Se você já criou o ruleset com `strict` ligado, desligue em **Settings → Rules
+→ `main protegida` → Require status checks to pass** e desmarque *Require
+branches to be up to date before merging*.
+
+> Se um dia o número justificar prevenção de novo, o caminho não é religar o
+> `strict` sozinho: é **merge queue**, que dá a mesma garantia sem multiplicar
+> por N. Ela está na lista do que este modelo não tem de propósito (README), e
+> essa lista é para ser revisada com dado medido, não com opinião.
 
 ### Migrar os status checks exigidos
 
@@ -267,16 +304,19 @@ gh api -X PUT "repos/$OWNER_REPO/rulesets/$RULESET_ID" --input /tmp/ruleset-novo
 > `--input` com o JSON inteiro, e não `-F rules=@arquivo`: `-F` mandaria a lista
 > de regras como **string** e o ruleset ficaria inválido.
 
-> **Confira o `strict` no passo 3.** O texto acima explica por que ele deve estar
-> `true`; se o passo 3 imprimir `strict: false`, o ruleset ativo diverge do que
-> este arquivo documenta e o `sync-prs` está trabalhando sem que nada obrigue o
-> PR a estar em dia. É uma decisão sua, e este comando **preserva** o valor que
-> estiver lá — não o corrige sozinho.
+> **Confira o `strict` no passo 3.** O esperado é `strict: false`, pela decisão
+> escrita acima. Se o passo 3 imprimir `strict: true`, o ruleset ativo diverge
+> deste arquivo — e cada merge na `main` está invalidando todos os PRs abertos
+> de uma vez. É uma decisão sua, e este comando **preserva** o valor que estiver
+> lá: ele troca só a lista de contextos.
 
-> Ligar o `strict` sem automação transformaria cada push na `main` numa rodada
-> de rebase manual. O workflow `sync-prs.yml` cobre isso: a cada push na `main`
-> ele atualiza os PRs abertos com o *Update branch* nativo. Não precisa de
-> configuração nova — usa o mesmo GitHub App do passo 1.
+> **O `sync-prs` não morreu junto com o `strict`.** Sem `strict`, o que sobra
+> dele é "integre cedo, em pedaços pequenos" — benefício real, mas incremental,
+> que não precisa acontecer a cada merge. Por isso ele deixou de rodar a cada
+> push na `main` e passou a rodar **uma vez por dia**, às 06:00 UTC, junto com o
+> `label-ttl` — mais o disparo manual, que continua. A amplificação cai de
+> O(merges × PRs) para O(1/dia). Não precisa de configuração nova: usa o mesmo
+> GitHub App do passo 1.
 
 > **Na demo, com 1 approve exigido e só você na sala:** você não consegue aprovar
 > o próprio PR. Ou peça o approve a alguém antes de começar, ou faça o bloco 5

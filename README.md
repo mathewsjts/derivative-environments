@@ -134,6 +134,17 @@ branch de ambiente: o SHA (para o `--force-with-lease`) e o manifesto (para
 responder "o conjunto mudou?"). Nenhum byte do conteúdo anterior sobrevive — a
 montagem parte sempre de `origin/main`.
 
+**A `main` tem CI, e é por isso que o `strict` está desligado.** Até aqui nenhum
+workflow rodava num push para a `main` — `pr-gates.yml` só tinha
+`on: pull_request` — e a `main` é produção. O único sinal pós-merge era o
+`docker build` do `rebuild-env`, que apenas compila. Agora os dois jobs rodam
+também no push: dois por merge, sempre os mesmos dois. É uma troca deliberada de
+**prevenção O(N × PRs abertos)** — o `strict` do ruleset, que invalida todos os
+PRs abertos a cada merge — por **detecção O(1)**: a `main` quebrada aparece em
+~60 segundos. O que se perde é a janela em que um PR mergeia validado contra uma
+`main` anterior, e o preço dela é um PR de correção, não uma produção quebrada
+em silêncio. O custo escrito está em [SETUP.md](SETUP.md) §3b.
+
 **Estar atrasada não exclui uma branch do ambiente.** A montagem sempre parte de
 `origin/main` e faz merge da branch: uma branch atrás da `main` entra
 normalmente enquanto não conflitar. O `sync-prs` existe por outros três motivos

@@ -1,10 +1,10 @@
 {
-  "environment": "main",
   "base": {
     "branch": "main",
-    "sha": ""
+    "sha": "cff9df89b5d914872eba4d155a7f18bf4c8f3f8c"
   },
-  "previousEnvHead": null,
+  "environment": "dev",
+  "excluded": [],
   "features": [],
-  "excluded": []
+  "previousEnvHead": "08cd0716032bf64ee9459e148d360b76a6a7d104"
 }

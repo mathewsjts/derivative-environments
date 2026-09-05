@@ -51,7 +51,7 @@ aba Actions depois de uma reconstrução, o token está certo.
 
    | Permissão | Nível | Para quê |
    |---|---|---|
-   | Contents | **Read and write** | push com `--force-with-lease` em `dev` e `hom` |
+   | Contents | **Read and write** | push com `--force-with-lease` em `dev` e `hom`, e a expiração diária em `env-resolutions` |
    | Pull requests | **Read and write** | comentar e aplicar/remover labels |
    | Metadata | Read-only | obrigatória, o GitHub adiciona sozinho |
 
@@ -100,6 +100,13 @@ Cinco labels, duas famílias com papéis bem diferentes:
 ```
 
 O script usa `gh label create --force`, então pode rodar quantas vezes quiser.
+
+**Continuam sendo cinco.** As resoluções gravadas (seção 3c) deliberadamente
+**não** ganharam label: `blocked:<env>` significa *fora do ambiente*, e quem
+entra por uma resolução está **dentro** — marcar seria tornar a label uma
+mentira e quebrar a limpeza de marcas órfãs do `notify.sh`. A memória desse
+estado é o marcador invisível no corpo do comentário, que sempre foi a memória
+de verdade do sistema; a label é o atalho barato para o caso comum.
 
 ---
 
@@ -334,6 +341,55 @@ gh api -X PUT "repos/$OWNER_REPO/rulesets/$RULESET_ID" --input /tmp/ruleset-novo
 
 ---
 
+### 3c. `env-resolutions` — o ref das resoluções gravadas
+
+Este ref só existe se alguém rodar `scripts/publish-resolution.sh`. **Não
+precisa criar nada agora**, e a POC funciona inteira sem ele — o
+`assemble-env.sh` desliga o `rerere` quando não encontra o ref e a montagem fica
+byte a byte a de sempre.
+
+O que ele é: um ref **órfão** (sem relação com a `main`) carregando o `rr-cache`
+do `git rerere` — as resoluções que alguém gravou para pares de PRs que
+conflitam. **Não é código.** Nada dele é buildado, e o único consumidor é a
+montagem.
+
+**Ele não recebe ruleset**, e a decisão é deliberada. As branches `dev` e `hom`
+são protegidas porque escrever nelas à mão desfaz o modelo; aqui é o contrário:
+escrever é o uso normal, feito por pessoas, pelo script. O controle está em
+outro lugar — a resolução só tem efeito se um PR carregar `deploy:*`, e essa
+label continua sendo o limite de confiança do modelo inteiro.
+
+Quem escreve nele:
+
+| Quem | Quando | Como |
+|---|---|---|
+| pessoa | grava uma resolução | `publish-resolution.sh`, com `--force-with-lease` |
+| App | expira resoluções órfãs | `label-ttl.yml`, diário, também com lease |
+| `rebuild-env` | **nunca** | ele só lê — ver abaixo |
+
+O "nunca" é uma invariante testada (`test-workflows.sh`), e o motivo é concreto:
+com `rerere` ligado, o próprio job **grava preimages** dos conflitos que *não*
+resolveu. São inofensivos — preimage sem postimage não faz nada —, mas se o job
+empurrasse o cache de volta, o ref viraria lixeira em duas semanas e a pergunta
+"quais resoluções estão vivas?" deixaria de ter resposta.
+
+Para inspecionar o que está gravado hoje:
+
+```bash
+git fetch origin env-resolutions
+git ls-tree -r --name-only FETCH_HEAD | grep meta.json \
+  | xargs -I{} git show FETCH_HEAD:{} | jq -s '.'
+```
+
+Para zerar tudo (o ambiente volta ao conjunto anterior, sem resíduo):
+
+```bash
+git push origin --delete env-resolutions
+gh workflow run rebuild-env.yml -f environment=ambos
+```
+
+---
+
 ## 4. SonarCloud
 
 O gate falha de propósito quando `SONAR_TOKEN` não existe. Um gate de qualidade
@@ -451,7 +507,10 @@ gh variable set ENABLE_FAKE_DEPLOY --body false    # depois
 gh secret list        # APP_ID, APP_PRIVATE_KEY, SONAR_TOKEN
 gh variable list      # VERCEL_URL_DEV, VERCEL_URL_HOM, ENABLE_FAKE_DEPLOY=true
 gh label list         # deploy:dev, deploy:hom, priority:high, blocked:dev, blocked:hom
-gh ruleset list       # 2 rulesets ativos
+gh ruleset list       # 2 rulesets ativos (env-resolutions NAO tem, ver 3c)
+
+# Opcional: se nao existir, tudo funciona igual e o rerere fica desligado.
+git ls-remote origin refs/heads/env-resolutions
 
 ./.github/scripts/test-assemble.sh   # a montagem, offline, ~5s
 ./.github/scripts/test-workflows.sh  # invariantes de concorrência dos workflows

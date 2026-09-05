@@ -53,6 +53,7 @@ main ─────────────────────────
 | ir para produção | merge do PR na `main` | reconstrói os dois ambientes sobre a nova base |
 | resolver um conflito | rebase na `main`, **uma vez** | a branch volta ao conjunto sozinha |
 | furar a fila com um ajuste crítico | aplica `priority:high` no PR | reconstrói com ela na frente; quem conflitava com ela sai |
+| testar **duas branches que conflitam** ao mesmo tempo | grava a resolução uma vez (`record-resolution.sh`) | reaplica a resolução em toda reconstrução; as branches não são tocadas |
 
 ## O que tem aqui
 
@@ -78,6 +79,11 @@ build-manifest.json         escrito pelo job; a fonte de verdade do /version
 scripts/
   seed-demo.sh              cria o estado inicial da demo (idempotente)
   create-labels.sh          cria as 5 labels
+  record-resolution.sh      prepara o merge de dois PRs que conflitam, para voce resolver
+  publish-resolution.sh     publica a resolucao no ref env-resolutions
+
+refs/heads/env-resolutions  ref orfao com o rr-cache do git rerere.
+                            Nao e codigo: e ENTRADA da montagem.
 ```
 
 ## Decisões que valem explicar
@@ -140,6 +146,47 @@ herda a ordem nova sem uma condicional. E o que a label **não** faz também é
 regra: ela não resolve conflito (duas prioritárias que brigam desempatam pelo
 número do PR, e a que perde sai igual) e não resgata branch atrasada em relação
 à `main`, que conflita sozinha com ou sem ela.
+
+**Duas branches que conflitam cabem no mesmo ambiente — se alguém escrever a
+terceira versão, e ela morar fora das branches.** Conflito significa que não
+existe uma versão do código com as duas. A pergunta não é *se* alguém escreve
+essa terceira versão, é **onde ela mora**:
+
+| onde | o que acontece |
+|---|---|
+| numa branch de integração | branch de longa duração com commits que não existem em outro lugar — o que este modelo eliminou. E ela apodrece: push na feature não chega mais no ambiente, porque a branch marcada é a de integração. |
+| dentro de uma das features | a branch passa a carregar código de uma feature que talvez nunca seja mergeada, e ele viaja junto até a produção. |
+| **num `rr-cache` versionado** | a resolução vira **entrada da derivação**. As branches ficam limpas, o loop "push → ambiente" continua vivo, e ela expira sozinha. |
+
+É a terceira. Um humano resolve **uma vez** (`record-resolution.sh`), publica no
+ref órfão `env-resolutions` (`publish-resolution.sh`), e o job reaplica em toda
+reconstrução. O manifesto registra de onde veio, o `/version` mostra, e o PR
+recebe um comentário dizendo, com todas as letras, que aquela resolução **não
+está no PR dele e não vai para produção**.
+
+Três propriedades sustentam isso, e as três são testadas em
+`.github/scripts/test-assemble.sh`:
+
+- **Falha para o lado seguro.** O id de um conflito no rerere é o hash do
+  *preimage*. Se qualquer uma das branches mexer na região em conflito, a
+  gravação deixa de casar e a branch volta a ser excluída, com o comentário de
+  sempre. Uma resolução nunca é aplicada a um código que ela não viu.
+- **Não depende da ordem.** O preimage é normalizado (os dois lados são
+  ordenados, e o nome da branch não entra), então a gravação feita com A antes
+  de B também vale com B antes de A — `priority:high` e resolução gravada
+  compõem em vez de brigarem.
+- **Não deixa resíduo.** Apagar o ref devolve **o mesmo SHA de ambiente** de
+  antes, do mesmo jeito que tirar a `priority:high`.
+
+E a armadilha que quase inviabiliza isso, escrita porque custa uma hora
+descobrir: **com uma resolução aplicável, `git merge` ainda sai com código 1.**
+Ele resolve a árvore inteira, deixa tudo staged e para esperando o commit. Quem
+olhar só o exit code — que era o que este script fazia — exclui do ambiente uma
+branch que na verdade entrou. O sinal certo é o índice: nenhum caminho em estado
+`U`. É por isso que existe o `merge_feature` no `assemble-env.sh`, e é por isso
+que as sondas de atribuição de culpa rodam com `rerere.enabled=false`: elas
+perguntam "estas duas branches se contradizem no texto?", e uma gravação não
+muda essa resposta — só mudaria quem leva a culpa.
 
 **A lógica de derivação vem da `main`, não do ref que disparou o job** — em duas
 camadas, porque o GitHub tem dois lugares onde a procedência escorrega:
@@ -213,16 +260,39 @@ dia em quarenta comentários.
 
 ## O que este modelo NÃO tem, de propósito
 
-Sem `git rerere`, sem **fila de prioridade com pesos**, sem merge queue, sem
-ambiente efêmero por PR. São otimizações para problemas cuja frequência ainda
-não foi medida. Este é o mínimo que resolve o que dói hoje — e é ele que produz
-o dado para justificar (ou descartar) a próxima peça.
+Sem **fila de prioridade com pesos**, sem merge queue, sem ambiente efêmero por
+PR. São otimizações para problemas cuja frequência ainda não foi medida. Este é
+o mínimo que resolve o que dói hoje — e é ele que produz o dado para justificar
+(ou descartar) a próxima peça.
 
-A `priority:high` é a exceção que confirma a regra: entrou porque o problema
-(ajuste crítico preso atrás de um PR mais antigo) apareceu, e porque o custo dela
-é uma expressão de ordenação — dois níveis, sem pesos, sem fila para administrar.
-Um terceiro nível seria uma linha de `jq`; a decisão de não ter é deliberada,
-não uma limitação.
+Duas exceções entraram, e as duas confirmam a regra em vez de furá-la: entraram
+porque o problema apareceu, e porque o custo delas é pequeno e contido.
+
+**`priority:high`** custa uma expressão de ordenação — dois níveis, sem pesos,
+sem fila para administrar. Um terceiro nível seria uma linha de `jq`; a decisão
+de não ter é deliberada, não uma limitação.
+
+**As resoluções gravadas** custam mais, e vale dizer o preço em voz alta: o
+ambiente passa a rodar um merge que nenhum PR contém. A diferença para o modelo
+antigo — onde as branches de ambiente acumulavam resoluções silenciosamente — é
+que aqui ela é **declarada, atribuída, auditável, reversível e com prazo**: mora
+num ref só dela, aparece no manifesto e no `/version`, o autor do PR é avisado
+de que existe, e ela expira sozinha quando qualquer um dos dois PRs fecha.
+
+Elas entraram porque a alternativa não era "abrir outro ambiente" — em
+infraestrutura que não provisiona ambiente sob demanda, a alternativa era **um QA
+parado**. Antes de pagar esse preço, meça: cada aplicação de `blocked:*` é um
+evento de conflito datado, e essa é a série que decide se isto se justifica.
+
+```bash
+gh api --paginate "repos/$GH_REPO/issues/events" \
+  --jq '[.[] | select(.event == "labeled" and (.label.name | startswith("blocked:")))]
+        | group_by(.label.name)[] | {label: .[0].label.name, eventos: length}'
+```
+
+Se der duas por trimestre, `priority:high` e revezamento bastam, e gravar
+resolução é over-engineering. Se der duas por semana, ela se paga — e você tem o
+número para defender a decisão.
 
 ## Rodando local
 
@@ -233,5 +303,15 @@ npm test
 npm run lint
 docker build -t derivative-environments .
 
-./.github/scripts/test-assemble.sh   # o mecanismo inteiro, sem GitHub
+./.github/scripts/test-assemble.sh    # o mecanismo inteiro, sem GitHub
+./.github/scripts/test-workflows.sh   # invariantes dos workflows
+```
+
+E o fluxo de uma resolução gravada, quando dois PRs precisam ser testados em
+paralelo e conflitam:
+
+```bash
+./scripts/record-resolution.sh 1 2    # prepara o merge; voce resolve no editor
+git add src/routes/index.ts && git commit --no-edit
+./scripts/publish-resolution.sh 1 2   # publica no ref; o push redispara o rebuild
 ```

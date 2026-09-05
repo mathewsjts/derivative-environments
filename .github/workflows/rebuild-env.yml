@@ -109,6 +109,8 @@ jobs:
   # nao reconstruir o que nao mudou:
   #
   #   labeled/unlabeled  -> so o ambiente da label. deploy:hom nao mexe em dev.
+  #                         priority:high e a excecao: e global, entao vale
+  #                         para os ambientes onde o PR ja tem deploy:*.
   #   closed/reopened    -> os dois: o PR pode estar nos dois conjuntos.
   #   push na main       -> os dois: a base mudou.
   #   push numa feature  -> so os ambientes cujo conjunto contem a branch.
@@ -141,6 +143,12 @@ jobs:
           SELECTED: ${{ github.event.inputs.environment || 'ambos' }}
           MAX_OVERRIDE: ${{ github.event.inputs.max_set || '' }}
           CHANGED_LABEL: ${{ github.event.label.name || '' }}
+          # As labels do PR DEPOIS do evento. priority:high e global -- ela nao
+          # diz em qual ambiente mexe --, entao a resposta "quais conjuntos
+          # mudam de ordem" e "aqueles em que este PR ja esta". Isso ja vem no
+          # payload: nenhuma chamada de API a mais para descobrir.
+          # Vazio em push e workflow_dispatch, que nao tem pull_request.
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
         run: |
           set -euo pipefail
 
@@ -199,9 +207,9 @@ jobs:
               fi
 
             elif [ "$EVENT_ACTION" = "labeled" ] || [ "$EVENT_ACTION" = "unlabeled" ]; then
-              # Uma label mexe no conjunto de UM ambiente so. Aplicar deploy:hom
-              # reconstruia dev tambem, para concluir no-op depois de montar o
-              # conjunto inteiro -- trabalho e minuto faturado por nada.
+              # Uma label deploy:* mexe no conjunto de UM ambiente so. Aplicar
+              # deploy:hom reconstruia dev tambem, para concluir no-op depois de
+              # montar o conjunto inteiro -- trabalho e minuto faturado por nada.
               #
               # Qualquer outra label (blocked:*, que o filtro acima ja pegou, ou
               # uma label de processo como `bug`) nao entra em conjunto nenhum:
@@ -209,6 +217,22 @@ jobs:
               if [ "$CHANGED_LABEL" = "deploy:$env_name" ]; then
                 wanted=true
                 reason="a label $CHANGED_LABEL mudou o conjunto deste ambiente"
+
+              elif [ "$CHANGED_LABEL" = "priority:high" ]; then
+                # Ela nao muda QUEM sao os candidatos, muda a ORDEM deles -- e
+                # ordem decide conflito. Vale so para os ambientes onde o PR ja
+                # esta; nos outros nao ha conjunto para reordenar.
+                #
+                # Em `unlabeled` o payload ja reflete a remocao, mas as labels
+                # deploy:* nao foram tocadas: a decisao e a mesma nos dois casos.
+                if jq -e --arg l "deploy:$env_name" 'index($l) != null' \
+                     <<<"${PR_LABELS:-[]}" >/dev/null 2>&1; then
+                  wanted=true
+                  reason="priority:high reordenou o conjunto (o PR tem deploy:$env_name)"
+                else
+                  reason="priority:high, mas o PR nao tem deploy:$env_name"
+                fi
+
               else
                 reason="a label '$CHANGED_LABEL' nao muda o conjunto de $env_name"
               fi

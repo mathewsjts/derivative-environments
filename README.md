@@ -52,6 +52,7 @@ main ─────────────────────────
 | tirar uma feature de `hom` | remove a label | reconstrói `hom` sem ela |
 | ir para produção | merge do PR na `main` | reconstrói os dois ambientes sobre a nova base |
 | resolver um conflito | rebase na `main`, **uma vez** | a branch volta ao conjunto sozinha |
+| furar a fila com um ajuste crítico | aplica `priority:high` no PR | reconstrói com ela na frente; quem conflitava com ela sai |
 
 ## O que tem aqui
 
@@ -76,7 +77,7 @@ build-manifest.json         escrito pelo job; a fonte de verdade do /version
 
 scripts/
   seed-demo.sh              cria o estado inicial da demo (idempotente)
-  create-labels.sh          cria as 4 labels
+  create-labels.sh          cria as 5 labels
 ```
 
 ## Decisões que valem explicar
@@ -113,6 +114,32 @@ duas branches "tocaram o mesmo arquivo" não diz qual delas é o par do conflito
 O job reproduz em pares (`main + X`, depois `main + F + X` para cada F já no
 conjunto) e reporta o primeiro que conflita. É barato e acerta o PR certo — que
 importa, porque o comentário manda a pessoa esperar um PR específico.
+
+**`priority:high` é ordenação, não preempção.** A ordem de montagem é quem
+decide o conflito: quem entra primeiro fica. Por padrão ela é o número do PR —
+estável e sem negociação —, mas isso é cego ao que ficou de fora: um ajuste
+crítico pode ficar preso atrás de um PR mais antigo que conflita com ele, e a
+única saída seria tirar a label do outro à mão.
+
+A tentação é resolver isso com preempção: ao conflitar, desfazer o merge de quem
+já entrou. Isso quebra a arquitetura de dois passes — o passe 2 faz `merge` sem
+tratar erro, apoiado na prova do passe 1 de que aquele subconjunto, **naquela
+ordem**, aplica limpo. Desmontar merges no meio invalida a prova, e um conflito
+no passe 2 derruba o job inteiro em vez de excluir uma branch.
+
+Então a prioridade entra onde custa uma linha, na ordenação dos candidatos:
+
+```
+map(.priority = (.priority // 0)) | sort_by([-.priority, .pr])
+```
+
+Sem ninguém usando a label, isso é **exatamente** o `sort_by(.pr)` de antes:
+mesma ordem, mesmo conjunto, mesmo SHA de ambiente. Todo o resto do pipeline —
+inclusão, atribuição de culpa, replay determinístico, manifesto, notificação —
+herda a ordem nova sem uma condicional. E o que a label **não** faz também é
+regra: ela não resolve conflito (duas prioritárias que brigam desempatam pelo
+número do PR, e a que perde sai igual) e não resgata branch atrasada em relação
+à `main`, que conflita sozinha com ou sem ela.
 
 **A lógica de derivação vem da `main`, não do ref que disparou o job** — em duas
 camadas, porque o GitHub tem dois lugares onde a procedência escorrega:
@@ -186,10 +213,16 @@ dia em quarenta comentários.
 
 ## O que este modelo NÃO tem, de propósito
 
-Sem `git rerere`, sem fila de prioridade entre branches, sem merge queue, sem
+Sem `git rerere`, sem **fila de prioridade com pesos**, sem merge queue, sem
 ambiente efêmero por PR. São otimizações para problemas cuja frequência ainda
 não foi medida. Este é o mínimo que resolve o que dói hoje — e é ele que produz
 o dado para justificar (ou descartar) a próxima peça.
+
+A `priority:high` é a exceção que confirma a regra: entrou porque o problema
+(ajuste crítico preso atrás de um PR mais antigo) apareceu, e porque o custo dela
+é uma expressão de ordenação — dois níveis, sem pesos, sem fila para administrar.
+Um terceiro nível seria uma linha de `jq`; a decisão de não ter é deliberada,
+não uma limitação.
 
 ## Rodando local
 

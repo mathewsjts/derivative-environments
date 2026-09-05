@@ -49,24 +49,56 @@ log "origin/main = $BASE_SHA"
 
 # ---------------------------------------------------------------------------
 # 2. Conjunto candidato: PRs abertos para a main com a label do ambiente.
-#    Ordenado por numero do PR -- ordem estavel, previsivel e defensavel:
-#    quem abriu antes entra antes, e ninguem precisa negociar prioridade.
+#
+#    A ORDEM E QUEM DECIDE O CONFLITO: quem entra primeiro fica, quem chega
+#    depois e nao aplica limpo fica de fora. Por padrao a ordem e o numero do
+#    PR -- estavel, previsivel e sem negociacao: quem abriu antes entra antes.
+#
+#    priority:high existe para o caso que essa regra atende mal: um ajuste
+#    critico preso atras de um PR mais antigo que conflita com ele. A label e
+#    de INTENCAO (aplicada por gente, como deploy:*) e vale para todo ambiente
+#    onde o PR ja esta.
+#
+#    E ela para por aqui: prioridade e ORDENACAO, nao preempcao. Nada depois
+#    desta secao sabe que a label existe -- passe 1, atribuicao de culpa,
+#    passe 2, manifesto e notificacao herdam a ordem nova sem uma condicional.
 # ---------------------------------------------------------------------------
 section "[$ENV_NAME] candidatos (label deploy:$ENV_NAME)"
+
+# Sem nenhum priority:high, isto e EXATAMENTE o sort_by(.pr) de antes: mesma
+# ordem, mesmo conjunto, mesmo SHA de ambiente. Essa equivalencia e o que
+# garante que a label nao mexe em quem nao a usa.
+#
+# O `// 0` tambem mantem as fixtures antigas de CANDIDATES_JSON validas: elas
+# nao conhecem o campo. E ele fica numa variavel so para que o caminho de
+# producao e o de teste nao possam divergir na ordenacao.
+ORDER='map(.priority = (.priority // 0)) | sort_by([-.priority, .pr])'
+
 # CANDIDATES_JSON existe para teste: permite exercitar a montagem inteira sem
 # GitHub (ver .github/scripts/test-assemble.sh). Em producao vem do gh.
 if [ -n "${CANDIDATES_JSON:-}" ]; then
-  CANDIDATES="$(jq -c 'sort_by(.pr)' <<<"$CANDIDATES_JSON")"
+  CANDIDATES="$(jq -c "$ORDER" <<<"$CANDIDATES_JSON")"
   log "usando CANDIDATES_JSON (modo teste)"
 else
+  # `labels` vem na MESMA chamada que ja fazemos: ler a prioridade nao custa
+  # uma requisicao a mais. O `index(...) != null` e proposital -- contains
+  # (["priority:high"]) faz match de substring e casaria com priority:highest.
   CANDIDATES="$(
     gh pr list --state open --base main --label "deploy:$ENV_NAME" --limit 100 \
-      --json number,headRefName,headRefOid,author \
-      --jq '[.[] | {pr: .number, branch: .headRefName, author: .author.login}] | sort_by(.pr)'
+      --json number,headRefName,headRefOid,author,labels \
+      --jq '[.[] | {pr: .number, branch: .headRefName, author: .author.login,
+                    priority: (if (.labels | map(.name) | index("priority:high")) != null
+                               then 1 else 0 end)}]' \
+    | jq -c "$ORDER"
   )"
 fi
 CANDIDATE_COUNT="$(jq 'length' <<<"$CANDIDATES")"
-log "$CANDIDATE_COUNT candidato(s)"
+PRIORITY_COUNT="$(jq '[.[] | select(.priority > 0)] | length' <<<"$CANDIDATES")"
+if [ "$PRIORITY_COUNT" -gt 0 ]; then
+  log "$CANDIDATE_COUNT candidato(s), $PRIORITY_COUNT com priority:high"
+else
+  log "$CANDIDATE_COUNT candidato(s)"
+fi
 
 # ---------------------------------------------------------------------------
 # 3. Teto do conjunto. Estourou, o job recusa e diz quem esta ocupando espaco --
@@ -81,7 +113,11 @@ if [ "$CANDIDATE_COUNT" -gt "$MAX_SET" ]; then
   {
     echo "Teto do ambiente '$ENV_NAME' estourado: $CANDIDATE_COUNT PRs marcados, maximo $MAX_SET."
     echo "Ocupando espaco agora:"
-    jq -r '.[] | "  #\(.pr) \(.branch) (@\(.author))"' <<<"$CANDIDATES"
+    # Na ordem nova, entao os prioritarios aparecem primeiro -- e marcados,
+    # porque "remova a label de algum deles" precisa da informacao de quais
+    # alguem ja declarou criticos.
+    jq -r '.[] | "  #\(.pr) \(.branch) (@\(.author))"
+                 + (if .priority > 0 then "  [priority:high]" else "" end)' <<<"$CANDIDATES"
     echo "Remova a label deploy:$ENV_NAME de algum deles e rode de novo."
   } >&2
   exit 2
@@ -117,10 +153,23 @@ while read -r row; do
   author="$(jq -r '.author' <<<"$row")"
   sha="$(git rev-parse "origin/$branch")"
 
+  # O rank so viaja para o manifesto daqui para baixo -- a decisao que ele
+  # tomava (a ordem) ja foi tomada na secao 2.
+  #
+  # E ele e OMITIDO quando e 0, o que nao e cosmetico: mantem o descritor de um
+  # conjunto sem prioridades byte a byte igual ao ja publicado. Com a chave
+  # sempre presente, a comparacao da secao 6 veria um campo novo e republicaria
+  # todo ambiente no primeiro rebuild apos o deploy desta feature -- churn puro,
+  # sem nada ter mudado de verdade.
+  prio="$(jq -r '.priority' <<<"$row")"
+  if [ "$prio" -gt 0 ]; then mark=" [priority:high]"; else mark=""; fi
+
   if git merge --no-ff --no-edit -m "merge(env): #$pr $branch" "$sha" >/dev/null 2>&1; then
-    log "OK      #$pr $branch"
+    log "OK      #$pr $branch$mark"
     INCLUDED="$(jq -c --argjson pr "$pr" --arg b "$branch" --arg s "$sha" --arg a "$author" \
-      '. + [{pr:$pr, branch:$b, sha:$s, author:$a}]' <<<"$INCLUDED")"
+      --argjson prio "$prio" \
+      '. + [{pr:$pr, branch:$b, sha:$s, author:$a}
+            + (if $prio > 0 then {priority:$prio} else {} end)]' <<<"$INCLUDED")"
   else
     files="$(git diff --name-only --diff-filter=U || true)"
     git merge --abort || git reset --hard --quiet HEAD
@@ -169,12 +218,13 @@ while read -r row; do
     git branch -D __probe >/dev/null 2>&1 || true
     files="$probe_files"
 
-    log "CONFLITO #$pr $branch (vs ${against}) -> $(tr '\n' ' ' <<<"$files")"
+    log "CONFLITO #$pr $branch$mark (vs ${against}) -> $(tr '\n' ' ' <<<"$files")"
     EXCLUDED="$(jq -c --argjson pr "$pr" --arg b "$branch" --arg s "$sha" --arg a "$author" \
-      --argjson against "$against" --arg files "$files" \
+      --argjson against "$against" --arg files "$files" --argjson prio "$prio" \
       '. + [{pr:$pr, branch:$b, sha:$s, author:$a, reason:"conflict",
              conflictsWith:$against,
-             files:($files | split("\n") | map(select(length > 0)))}]' <<<"$EXCLUDED")"
+             files:($files | split("\n") | map(select(length > 0)))}
+            + (if $prio > 0 then {priority:$prio} else {} end)]' <<<"$EXCLUDED")"
   fi
 done < <(jq -c '.[]' <<<"$CANDIDATES")
 

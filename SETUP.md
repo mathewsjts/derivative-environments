@@ -404,7 +404,8 @@ gh variable list      # VERCEL_URL_DEV, VERCEL_URL_HOM, ENABLE_FAKE_DEPLOY=true
 gh label list         # deploy:dev, deploy:hom, blocked:dev, blocked:hom
 gh ruleset list       # 2 rulesets ativos
 
-./.github/scripts/test-assemble.sh   # 29 verificações, offline, ~5s
+./.github/scripts/test-assemble.sh   # a montagem, offline, ~5s
+./.github/scripts/test-workflows.sh  # invariantes de concorrência dos workflows
 ./scripts/seed-demo.sh               # 3 PRs + primeira reconstrução
 gh run list --limit 5                # rebuild-env e fake-deploy verdes
 ```

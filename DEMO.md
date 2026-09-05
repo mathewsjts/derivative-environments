@@ -29,7 +29,8 @@
 
 ```bash
 gh variable set ENABLE_FAKE_DEPLOY --body true   # ⚠️ o bloco 2 depende disto
-./.github/scripts/test-assemble.sh    # verificações offline, ~5s
+./.github/scripts/test-assemble.sh    # a montagem, offline, ~5s
+./.github/scripts/test-workflows.sh   # invariantes de concorrência
 ./scripts/seed-demo.sh                # 3 PRs + primeira reconstrução
 gh run list --limit 5                 # rebuild-env e fake-deploy verdes
 ```

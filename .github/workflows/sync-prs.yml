@@ -18,9 +18,39 @@
 #
 # O QUE ELE FAZ
 #
-# A cada push na main, atualiza cada PR aberto com o "Update branch" nativo do
-# GitHub (merge da main na branch). Nao rebaseia e nao faz force-push: quem
-# tiver a branch localmente continua conseguindo dar `git pull`.
+# A cada push na main, atualiza com o "Update branch" nativo do GitHub (merge da
+# main na branch) cada PR aberto QUE CARREGA ALGUMA LABEL deploy:*. Nao rebaseia
+# e nao faz force-push: quem tiver a branch localmente continua conseguindo dar
+# `git pull`.
+#
+# POR QUE SO OS MARCADOS (only_labeled, padrao true)
+#
+# Atualizar todo PR aberto amplifica um merge na main numa rajada de runs: cada
+# atualizacao e um push, cada push dispara pr-gates e rebuild-env. Com 30 PRs
+# abertos, um merge vira ~30 runs extras -- a amplificacao mais perigosa deste
+# desenho em escala real, e ela cresce com o numero de PRs abertos, nao com o
+# tamanho do time.
+#
+# Os tres motivos do bloco acima so valem AGORA para quem esta num ambiente:
+#
+#   1. `strict` bloqueia o merge de PR desatualizado -- so importa quando o PR
+#      esta prestes a mergear, e ai o proprio autor clica em "Update branch".
+#   2. Gates rodando contra uma main que nao existe mais -- eles re-rodam no
+#      proximo push da branch de qualquer jeito.
+#   3. Branch atrasada tem mais chance de conflitar -- so importa para quem
+#      disputa espaco num conjunto.
+#
+# O QUE ISSO CUSTA, DITO EXPLICITAMENTE
+#
+# Um PR sem label que ganhar uma label depois so sera atualizado no PROXIMO push
+# na main -- aplicar a label nao dispara este workflow. Ate la ele pode estar
+# atrasado, e isso e inofensivo: a montagem parte sempre de origin/main e faz
+# merge da branch, entao estar atras nao exclui ninguem do ambiente (ver o
+# primeiro paragrafo). Quem quiser a atualizacao na hora tem dois botoes: o
+# "Update branch" do proprio PR, ou este workflow no modo manual.
+#
+# Para atualizar TODO PR aberto (o comportamento antigo), rode manualmente com
+# a caixa `only_labeled` desmarcada.
 #
 # O QUE ELE NAO FAZ
 #
@@ -46,9 +76,9 @@ on:
         type: boolean
         default: false
       only_labeled:
-        description: "Atualizar so PRs com alguma label deploy:*"
+        description: "Atualizar so PRs com alguma label deploy:* (ver o cabecalho)"
         type: boolean
-        default: false
+        default: true
 
 permissions:
   contents: read
@@ -99,7 +129,11 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
-          ONLY_LABELED: ${{ github.event.inputs.only_labeled || 'false' }}
+          # Em push na main nao existe `inputs`, entao o fallback e o padrao de
+          # verdade deste workflow. Desmarcar a caixa no disparo manual manda a
+          # string 'false', que e truthy na expressao e vence o fallback --
+          # continua dando para atualizar TODO PR aberto de proposito.
+          ONLY_LABELED: ${{ github.event.inputs.only_labeled || 'true' }}
         run: |
           set -euo pipefail
 

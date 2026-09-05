@@ -9,8 +9,32 @@
 # feat/X -> main, e este workflow e o unico portao. Nada chega na main sem
 # passar por ele, e nada chega em dev/hom sem estar num PR aberto para a main.
 #
-# Os jobs sao paralelos de proposito: o orcamento da POC e CI de PR abaixo de
-# 2 minutos de relogio de parede.
+# POR QUE SAO DOIS JOBS, E NAO CINCO
+#
+# Eram cinco jobs paralelos. O relogio de parede ficava em ~20s, mas a conta do
+# GitHub e arredondada por JOB: cinco jobs de poucos segundos custam 5 minutos
+# faturados para menos de um minuto de computacao real. A POC gastou 165 jobs
+# aqui para 47 minutos de trabalho de verdade.
+#
+# Agora sao dois:
+#
+#   gates do PR   typecheck, lint, testes, npm audit, docker build e sincronia
+#                 com a main. Todos compartilham o mesmo `npm ci`, entao juntar
+#                 nao repete instalacao nenhuma.
+#   SonarCloud    separado, porque precisa do proprio checkout com
+#                 fetch-depth: 0 e leva ~34s -- serializa-lo dobraria o relogio
+#                 de parede sem economizar job nenhum.
+#
+# O relogio de parede vai de ~20s para ~60s. O orcamento da POC e 2 minutos por
+# PR, entao continua folgado.
+#
+# ⚠️  O NOME DESTES DOIS JOBS E CONTRATO COM O RULESET "main protegida".
+#
+# O ruleset exige status checks POR NOME. Renomear um job faz o contexto antigo
+# nunca mais reportar, e todo PR fica bloqueado para sempre esperando um check
+# que nao existe mais. Por isso o nome aqui e `gates do PR`, e nao a lista dos
+# passos que ele roda: acrescentar ou tirar um gate la dentro nao pode exigir
+# uma migracao de ruleset. Ver SETUP.md, secao 3b.
 # ---------------------------------------------------------------------------
 name: pr-gates
 
@@ -30,14 +54,29 @@ permissions:
 
 jobs:
   # -------------------------------------------------------------------------
-  # typecheck + lint + testes. Um job so porque compartilham o mesmo npm ci.
+  # Tudo que compartilha o mesmo `npm ci`, mais os dois gates que nao dependem
+  # de npm nenhum (docker build e sincronia).
+  #
+  # A ordem e deliberada: os passos que reprovam com mais frequencia vem antes,
+  # para o log ficar curto no caso comum. `sincronia com a main` fica por
+  # ultimo porque, com o `strict` do ruleset ligado, uma branch atras da main e
+  # situacao rotineira -- reprovar nela primeiro esconderia o resultado de todo
+  # o resto.
   # -------------------------------------------------------------------------
-  verify:
-    name: typecheck / lint / testes
+  gates:
+    name: gates do PR
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Historico completo por causa do gate de sincronia la embaixo, que
+          # precisa comparar o HEAD do PR com a main.
+          #
+          # O checkout e o merge ref do PR (padrao em `pull_request`), que e o
+          # que os outros gates devem verificar: o codigo desta feature JUNTO
+          # com o que ja esta na main.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -55,45 +94,35 @@ jobs:
       - name: testes
         run: npm test
 
-  # -------------------------------------------------------------------------
-  # npm audit
-  #
-  # --omit=dev de proposito: vulnerabilidade em vitest/eslint nao vai para
-  # producao, e reprovar PR por causa de ferramenta de desenvolvimento treina
-  # todo mundo a ignorar o gate. O que embarca e o que e auditado.
-  # -------------------------------------------------------------------------
-  audit:
-    name: npm audit (producao)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-      - run: npm ci --no-audit --no-fund
-      - run: npm audit --omit=dev --audit-level=high
+      # -----------------------------------------------------------------
+      # npm audit
+      #
+      # --omit=dev de proposito: vulnerabilidade em vitest/eslint nao vai para
+      # producao, e reprovar PR por causa de ferramenta de desenvolvimento
+      # treina todo mundo a ignorar o gate. O que embarca e o que e auditado.
+      # -----------------------------------------------------------------
+      - name: npm audit (producao)
+        run: npm audit --omit=dev --audit-level=high
 
-  # -------------------------------------------------------------------------
-  # docker build
-  #
-  # GATE, NAO DEPLOY. A Vercel nunca le este Dockerfile -- ela roda a API como
-  # funcao serverless. O build existe para provar que o codigo instala e compila
-  # com dependencias de producao, e e o mesmo comando que o rebuild-env roda
-  # sobre o CONJUNTO montado antes de publicar um ambiente.
-  # -------------------------------------------------------------------------
-  docker:
-    name: docker build (gate)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: docker build (sem cache, cronometrado)
+      # -----------------------------------------------------------------
+      # docker build
+      #
+      # GATE, NAO DEPLOY. A Vercel nunca le este Dockerfile -- ela roda a API
+      # como funcao serverless. O build existe para provar que o codigo instala
+      # e compila com dependencias de producao, e e o mesmo comando que o
+      # rebuild-env roda sobre o CONJUNTO montado antes de publicar um ambiente.
+      #
+      # `!cancelled()` porque este gate nao depende do `npm ci`: quando eram
+      # jobs separados, um lint vermelho nao impedia o docker de reportar. Nao
+      # ha razao para perder isso ao juntar.
+      # -----------------------------------------------------------------
+      - name: docker build (gate)
+        if: ${{ !cancelled() }}
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           start=$(date +%s)
-          docker build --no-cache -t derivative-environments:pr-${{ github.event.pull_request.number }} .
+          docker build --no-cache -t "derivative-environments:pr-${PR_NUMBER}" .
           elapsed=$(( $(date +%s) - start ))
           echo "docker build levou ${elapsed}s"
           echo "### 🐳 docker build: ${elapsed}s (orcamento: 30s)" >> "$GITHUB_STEP_SUMMARY"
@@ -101,8 +130,64 @@ jobs:
             echo "::warning::docker build passou de 30s (${elapsed}s). Ver .dockerignore e os estagios do Dockerfile."
           fi
 
+      # -----------------------------------------------------------------
+      # Sincronia com a main
+      #
+      # A branch nao pode estar ATRAS da main. Sem isso os gates aprovam um
+      # codigo que nunca foi testado junto com o que ja esta na main.
+      #
+      # Este gate tem um segundo papel no modelo: quando um PR conflitante e
+      # mergeado, e ele que fica vermelho e diz, para quem ficou de fora do
+      # ambiente, que chegou a hora de rebasear e resolver o conflito UMA vez --
+      # contra codigo real e ja mergeado, e nao contra a branch especulativa de
+      # outra pessoa. Ver bloco 5 do DEMO.md.
+      #
+      # A comparacao e contra o HEAD REAL do PR, buscado de refs/pull/N/head. O
+      # merge ref que esta no workspace nao serve: ele tem a main como ancestral
+      # por construcao, entao o gate nunca reprovaria.
+      # -----------------------------------------------------------------
+      - name: sincronia com a main
+        if: ${{ !cancelled() }}
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # Refspecs explicitas nos dois: `git fetch origin main` depende da
+          # atualizacao oportunista do remote-tracking ref, e aqui nao ha por que
+          # depender dela.
+          git fetch --quiet origin \
+            "+refs/heads/main:refs/remotes/origin/main" \
+            "+refs/pull/${PR_NUMBER}/head:refs/remotes/origin/pr-head"
+
+          if git merge-base --is-ancestor origin/main refs/remotes/origin/pr-head; then
+            echo "Em dia com a main ($(git rev-parse --short origin/main))."
+            exit 0
+          fi
+
+          behind=$(git rev-list --count refs/remotes/origin/pr-head..origin/main)
+          echo "::error title=Branch desatualizada::${behind} commit(s) da main nao estao nesta branch."
+          {
+            echo ""
+            echo "Esta branch esta ${behind} commit(s) atras de origin/main."
+            echo ""
+            echo "Os gates precisam rodar sobre o codigo desta feature JUNTO com o"
+            echo "que ja esta na main. Rode:"
+            echo ""
+            echo "  git fetch origin main"
+            echo "  git rebase origin/main"
+            echo "  git push --force-with-lease"
+            echo ""
+            echo "Se aparecer conflito nesse rebase, e agora que ele se resolve:"
+            echo "uma vez so, contra codigo que ja foi revisado e mergeado."
+            echo ""
+          } >&2
+          exit 1
+
   # -------------------------------------------------------------------------
   # SonarCloud
+  #
+  # Fica sozinho: precisa do proprio checkout com fetch-depth: 0 e leva ~34s.
+  # Junta-lo ao job acima nao economizaria job nenhum e dobraria o relogio.
   #
   # Sem SONAR_TOKEN o passo FALHA e diz o que configurar. Nunca passa verde por
   # ausencia de token: um gate que se desliga sozinho quando falta credencial e
@@ -150,54 +235,3 @@ jobs:
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: https://sonarcloud.io
-
-  # -------------------------------------------------------------------------
-  # Sincronia com a main
-  #
-  # A branch nao pode estar ATRAS da main. Sem isso os gates aprovam um codigo
-  # que nunca foi testado junto com o que ja esta na main.
-  #
-  # Este gate tem um segundo papel no modelo: quando um PR conflitante e
-  # mergeado, e ele que fica vermelho e diz, para quem ficou de fora do
-  # ambiente, que chegou a hora de rebasear e resolver o conflito UMA vez --
-  # contra codigo real e ja mergeado, e nao contra a branch especulativa de
-  # outra pessoa. Ver bloco 5 do DEMO.md.
-  # -------------------------------------------------------------------------
-  sync:
-    name: sincronia com a main
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # Sem isso o checkout traria o merge commit sintetico do PR, que tem
-          # a main como ancestral por construcao -- o gate nunca reprovaria.
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 0
-
-      - name: A branch esta atras da main?
-        run: |
-          git fetch --quiet origin main
-          if git merge-base --is-ancestor origin/main HEAD; then
-            echo "Em dia com a main ($(git rev-parse --short origin/main))."
-            exit 0
-          fi
-
-          behind=$(git rev-list --count HEAD..origin/main)
-          echo "::error title=Branch desatualizada::${behind} commit(s) da main nao estao nesta branch."
-          {
-            echo ""
-            echo "Esta branch esta ${behind} commit(s) atras de origin/main."
-            echo ""
-            echo "Os gates precisam rodar sobre o codigo desta feature JUNTO com o"
-            echo "que ja esta na main. Rode:"
-            echo ""
-            echo "  git fetch origin main"
-            echo "  git rebase origin/main"
-            echo "  git push --force-with-lease"
-            echo ""
-            echo "Se aparecer conflito nesse rebase, e agora que ele se resolve:"
-            echo "uma vez so, contra codigo que ja foi revisado e mergeado."
-            echo ""
-          } >&2
-          exit 1

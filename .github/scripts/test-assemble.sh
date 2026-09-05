@@ -13,6 +13,9 @@
 #   5. o manifesto reflete o conjunto publicado
 #   6. nenhuma branch de feature carrega resolucao de conflito de outra
 #   7. priority:high inverte quem ganha a vaga -- e nada mais
+#   8. uma resolucao gravada poe B de volta no conjunto, sem tocar em branch
+#   9. a gravacao falha para o lado seguro quando o codigo em conflito muda
+#  10. quem nao usa resolucao nenhuma nao ganha campo novo no manifesto
 #
 # Rode antes de ensaiar a demo: ./.github/scripts/test-assemble.sh
 set -euo pipefail
@@ -259,7 +262,225 @@ check "e o SHA e o mesmo da primeira montagem do harness" \
   "$(jq -r '.envHead' "$WORK/prio6.json")" "$HEAD1"
 
 echo
-echo "== bloco 5 da demo: A e mergeada na main =="
+echo "== resolucao gravada: A e B no mesmo ambiente, sem tocar em branch nenhuma =="
+#
+# O caso que motivou a feature: dois QAs precisam testar A e B em paralelo e so
+# existe um ambiente. Elas conflitam, entao nao existe uma versao do codigo com
+# as duas -- a menos que alguem escreva a terceira. Esta secao prova que essa
+# terceira versao pode morar FORA das branches, como entrada da montagem.
+#
+# A gravacao aqui e feita a mao porque o record-resolution.sh precisa do `gh`
+# (ele traduz numero de PR em nome de branch). O que ele faz depois disso e
+# exatamente o que esta abaixo, e a PUBLICACAO usa o script de verdade.
+
+A_ORIGINAL="$(git rev-parse feat/a-user-endpoint)"
+
+record_resolution() { # record_resolution -- grava a resolucao de A x B no cache local
+  git config rerere.enabled true
+  git config rerere.autoUpdate true
+  rm -rf "$(git rev-parse --absolute-git-dir)/rr-cache"
+  git checkout --quiet -B rr-work main
+  git merge --no-ff --no-edit -m "merge(env): #1" feat/a-user-endpoint >/dev/null
+  git merge --no-ff --no-edit -m "merge(env): #2" feat/b-auth-endpoint >/dev/null 2>&1 || true
+  # A resolucao humana: mantem os dois lados. E o que qualquer um faria num
+  # registry -- as duas rotas precisam existir.
+  perl -0pi -e 's/^<<<<<<< .*\n//mg; s/^=======\n//mg; s/^>>>>>>> .*\n//mg' src/routes/index.ts
+  git add src/routes/index.ts
+  git commit --quiet --no-edit
+  git checkout --quiet main
+  git branch -D rr-work >/dev/null 2>&1 || true
+}
+
+record_resolution
+check "a gravacao produziu uma resolucao no cache local" \
+  "$(find "$(git rev-parse --absolute-git-dir)/rr-cache" -name postimage | wc -l | tr -d ' ')" "1"
+
+# Publicacao pelo script de verdade -- inclusive o commit e o push no ref.
+bash "$REPO_ROOT/scripts/publish-resolution.sh" 1 2 >/dev/null 2>&1
+check "o ref env-resolutions existe no remoto" \
+  "$([ -n "$(git ls-remote origin refs/heads/env-resolutions | cut -f1)" ] && echo sim || echo nao)" "sim"
+check "o ref carrega meta.json com o par de PRs" \
+  "$(git fetch --quiet origin env-resolutions && git show FETCH_HEAD --name-only --format= | grep -c 'meta.json')" "1"
+
+git checkout --quiet main
+run_assemble "$WORK/rr1.json"
+RR1="$WORK/rr1.json"
+
+check "agora as TRES entram no conjunto" \
+  "$(jq -r '[.features[].pr] | join(",")' "$RR1")" "1,2,3"
+check "nenhuma exclusao" \
+  "$(jq -r '.excluded | length' "$RR1")" "0"
+check "B esta marcada como resolvida" \
+  "$(jq -r '.features[] | select(.pr == 2) | .resolvedBy | join(",")' "$RR1")" "src/routes/index.ts"
+check "e o comentario dela sabe contra quem (o par e o PR #1)" \
+  "$(jq -r '.features[] | select(.pr == 2) | .conflictsWith' "$RR1")" "1"
+check "A nao ganhou marca nenhuma: quem entrou primeiro entrou limpo" \
+  "$(jq -r '.features[] | select(.pr == 1) | has("resolvedBy")' "$RR1")" "false"
+
+check "o build tem as tres rotas" \
+  "$(git show hom:src/routes/index.ts | grep -cE 'usersRouter|authRouter|metricsRouter')" "6"
+check "o manifesto diz de onde veio a resolucao" \
+  "$(git show hom:build-manifest.json | jq -r '.resolutions.ref')" "env-resolutions"
+check "e o manifesto marca a feature que dependeu dela" \
+  "$(git show hom:build-manifest.json | jq -r '[.features[] | select(has("resolvedBy")) | .pr] | join(",")')" "2"
+
+echo
+echo "== e as branches continuam limpas: a resolucao nao mora em nenhuma delas =="
+# O ponto inteiro da feature. Se isto falhar, ela virou branch de integracao.
+check "feat/a-user-endpoint segue sem codigo de B" \
+  "$(git show feat/a-user-endpoint:src/routes/index.ts | grep -c authRouter || true)" "0"
+check "feat/b-auth-endpoint segue sem codigo de A" \
+  "$(git show feat/b-auth-endpoint:src/routes/index.ts | grep -c usersRouter || true)" "0"
+check "as branches nao se moveram" \
+  "$(git rev-parse feat/a-user-endpoint)" "$A_ORIGINAL"
+
+echo
+echo "== com resolucao, a montagem segue deterministica =="
+RRHEAD1="$(jq -r '.envHead' "$RR1")"
+git checkout --quiet main
+run_assemble "$WORK/rr2.json"
+check "mesmo SHA de ambiente" "$(jq -r '.envHead' "$WORK/rr2.json")" "$RRHEAD1"
+
+# O no-op compara CONJUNTOS lendo o manifesto da branch remota, entao ele so
+# tem o que comparar depois de uma publicacao de verdade. E vale testar aqui:
+# se `resolutions` entrasse no descritor de forma instavel, republicar o mesmo
+# conjunto viraria churn eterno.
+git push --quiet origin "HEAD:refs/heads/hom"
+git checkout --quiet main
+run_assemble "$WORK/rr2b.json"
+check "republicar o mesmo conjunto com resolucao continua sendo no-op" \
+  "$(jq -r '.noop' "$WORK/rr2b.json")" "true"
+git push --quiet origin --delete hom
+
+echo
+echo "== a gravacao independe da ordem: priority:high nao a invalida =="
+#
+# O id de um conflito no rerere e o hash do preimage NORMALIZADO -- os dois lados
+# sao ordenados antes do hash e o nome da branch nao entra. Entao a gravacao
+# feita com A antes de B tambem vale com B antes de A. Sem esta propriedade,
+# priority:high e resolucao gravada seriam mutuamente exclusivas.
+git checkout --quiet main
+assemble "$WORK/rr3.json" "$B_PRIORITARIA"
+check "B entra na frente e A NAO sai mais" \
+  "$(jq -r '[.features[].pr] | join(",")' "$WORK/rr3.json")" "2,1,3"
+check "nenhuma exclusao, mesmo com a ordem invertida" \
+  "$(jq -r '.excluded | length' "$WORK/rr3.json")" "0"
+check "agora quem entra por resolucao e A, que chegou depois" \
+  "$(jq -r '[.features[] | select(has("resolvedBy")) | .pr] | join(",")' "$WORK/rr3.json")" "1"
+check "e o conteudo e o mesmo: as tres rotas no ar" \
+  "$(git show hom:src/routes/index.ts | grep -cE 'usersRouter|authRouter|metricsRouter')" "6"
+
+echo
+echo "== quem nao depende de resolucao nao ganha campo novo =="
+#
+# O ref existe e tem uma gravacao dentro, mas este conjunto (A e C) nao conflita.
+# Se `resolutions` aparecesse assim mesmo, o descritor de TODO ambiente mudaria
+# e o primeiro rebuild depois desta feature republicaria dev e hom sem nada ter
+# mudado de verdade -- exatamente o que a omissao de `priority` evita.
+git checkout --quiet main
+assemble "$WORK/rr4.json" "$A_E_C"
+check "conjunto sem conflito nao registra resolutions" \
+  "$(jq -r '.resolutions' "$WORK/rr4.json")" "null"
+check "e nenhuma feature ganha resolvedBy" \
+  "$(jq -r '[.features[] | has("resolvedBy")] | any' "$WORK/rr4.json")" "false"
+check "o SHA e identico ao do mesmo conjunto antes de existir resolucao alguma" \
+  "$(jq -r '.envHead' "$WORK/rr4.json")" "$(jq -r '.envHead' "$WORK/prio4.json")"
+
+echo
+echo "== falha para o lado seguro: A mexe na regiao e a gravacao para de valer =="
+#
+# A propriedade que torna isto aceitavel. Uma resolucao gravada NUNCA sobrevive
+# a uma mudanca real no codigo que ela reconciliava: o id e o hash do preimage.
+# O sistema degrada para o comportamento de sempre -- exclusao com comentario --
+# e nao para um merge silencioso de codigo que ninguem revisou.
+git checkout --quiet -B feat/a-user-endpoint feat/a-user-endpoint
+insert_before "// feature-imports:end" "import { profileRouter } from './profile';" src/routes/index.ts
+printf "import { Router } from 'express';\nexport const profileRouter = Router();\n" > src/routes/profile.ts
+git add -A
+git commit --quiet -m "feat(users): + /profile na mesma regiao"
+git push --quiet origin feat/a-user-endpoint
+
+git checkout --quiet main
+run_assemble "$WORK/rr5.json"
+check "B volta a ficar de fora" \
+  "$(jq -r '[.excluded[].pr] | join(",")' "$WORK/rr5.json")" "2"
+check "com a atribuicao de culpa correta, e nao 'atrasada em relacao a main'" \
+  "$(jq -r '.excluded[0].conflictsWith' "$WORK/rr5.json")" "1"
+check "e A e C seguem publicadas" \
+  "$(jq -r '[.features[].pr] | join(",")' "$WORK/rr5.json")" "1,3"
+
+# Devolve A ao estado anterior para as secoes seguintes.
+git checkout --quiet -B feat/a-user-endpoint "$A_ORIGINAL"
+git push --quiet --force origin feat/a-user-endpoint
+git checkout --quiet main
+
+echo
+echo "== o comentario do PR: a maquina de estados do notify.sh =="
+#
+# O comentario e o produto, nao um efeito colateral: se ele disser "o conflito
+# nao existe mais" para quem entrou por resolucao, a pessoa acredita que a
+# branch dela esta limpa e nao rebaseia nunca. Aqui a maquina roda inteira sem
+# GitHub, pelos ganchos BLOCKED_JSON e COMMENT_STATE_JSON.
+git checkout --quiet main
+run_assemble "$WORK/rrN.json"
+
+notify() { # notify <blocked-json> <estados-ja-comentados>
+  ENV_NAME=hom STATE_FILE="$WORK/rrN.json" DRY_RUN=true GH_REPO=teste/teste \
+  BLOCKED_JSON="$1" COMMENT_STATE_JSON="$2" \
+    bash "$REPO_ROOT/.github/scripts/notify.sh" 2>&1
+}
+
+# B estava excluida (carrega blocked:hom, ultimo comentario foi de conflito) e
+# agora entra por resolucao: transicao conflict -> resolved.
+OUT="$(notify '[2]' '{"2":"conflict"}')"
+check "comenta a entrada por resolucao" \
+  "$(grep -c 'Dentro de .*hom.*por uma resolução gravada' <<<"$OUT")" "1"
+check "e nomeia o par contra quem ela conflita" \
+  "$(grep -c 'conflita com #1' <<<"$OUT")" "1"
+check "diz explicitamente que a resolucao nao esta no PR" \
+  "$(grep -c 'NÃO está no seu PR' <<<"$OUT")" "1"
+check "NAO diz que o conflito acabou (seria mentira)" \
+  "$(grep -c 'conflito que a excluía não existe mais' <<<"$OUT" || true)" "0"
+check "e devolve a marca blocked:hom, porque ela esta DENTRO agora" \
+  "$(grep -c '\[dry-run\] -blocked:hom em #2' <<<"$OUT")" "1"
+check "A e C, que entraram limpas e nunca sairam, nao geram comentario" \
+  "$(grep -c 'comentario para #1\|comentario para #3' <<<"$OUT" || true)" "0"
+
+# Segunda execucao, mesmo estado: silencio absoluto.
+OUT2="$(notify '[]' '{"2":"resolved"}')"
+check "segue entrando por resolucao -> nenhum comentario" \
+  "$(grep -c 'comentario para #' <<<"$OUT2" || true)" "0"
+check "e o log diz por que ficou calado" \
+  "$(grep -c '#2 segue entrando por resolucao' <<<"$OUT2")" "1"
+
+# A resolucao deixou de ser necessaria (o outro PR mergeou): resolved -> limpa.
+# Simulado trocando o state file por um em que ninguem tem resolvedBy, mas o
+# manifesto anterior dizia que #2 dependia de uma.
+jq '(.features[] |= del(.resolvedBy, .conflictsWith)) | .resolutions = null | .resolvedBefore = [2]' \
+  "$WORK/rrN.json" > "$WORK/rrN-limpo.json"
+OUT3="$(ENV_NAME=hom STATE_FILE="$WORK/rrN-limpo.json" DRY_RUN=true GH_REPO=teste/teste \
+        BLOCKED_JSON='[]' COMMENT_STATE_JSON='{"2":"resolved"}' \
+        bash "$REPO_ROOT/.github/scripts/notify.sh" 2>&1)"
+check "avisa que a resolucao nao e mais necessaria" \
+  "$(grep -c 'não precisa mais da resolução gravada' <<<"$OUT3")" "1"
+check "e sugere o rebase, que agora e contra codigo mergeado" \
+  "$(grep -c 'vale rebasear' <<<"$OUT3")" "1"
+
+echo
+echo "== apagar o ref devolve exatamente o conjunto anterior =="
+# Reversibilidade ate o SHA, como na priority:high: a resolucao nao deixa
+# residuo em lugar nenhum -- nem em branch, nem no ambiente.
+git push --quiet origin --delete env-resolutions
+git checkout --quiet main
+run_assemble "$WORK/rr6.json"
+check "sem o ref, B fica de fora de novo" \
+  "$(jq -r '[.excluded[].pr] | join(",")' "$WORK/rr6.json")" "2"
+check "e o SHA volta a ser o da primeira montagem do harness" \
+  "$(jq -r '.envHead' "$WORK/rr6.json")" "$HEAD1"
+
+echo
+echo "== bloco 5 da demo: A e mergeada na main ==
+"
 git checkout --quiet main
 git merge --quiet --no-ff -m "merge: #1 feat/a-user-endpoint" feat/a-user-endpoint
 git push --quiet origin main

@@ -231,12 +231,27 @@ continua em silêncio.
 `main` agora. B continua fora — e **não recebeu comentário**, porque o estado
 dela não mudou.
 
-**Mostrar:** o job `sync-prs`. Ele atualizou o PR de C sozinho — a `main` andou,
-a branch acompanhou, ninguém fez nada. E **não conseguiu** atualizar o de B:
+**Fazer:** disparar o `sync-prs`. Ele é **diário**, não reflexo de push — então
+no palco ele é um comando, não uma surpresa:
 
-> Conflito. O job não resolve conflito, nem aqui nem na montagem do ambiente:
-> ele pula e segue. É a mesma regra nos dois lugares, e é o único ponto do
-> processo onde uma pessoa precisa entrar.
+```bash
+gh workflow run sync-prs.yml
+gh run watch
+```
+
+**Mostrar:** o resumo do job. Ele atualizou o PR de C — a `main` andou, a branch
+acompanhou, e **ninguém rebaseou nada à mão**. E não conseguiu atualizar o de B:
+
+> Eu disparei esse job de propósito: ele roda uma vez por dia, e não a cada
+> merge. Rodar a cada push na `main` custaria uma rajada de CI proporcional ao
+> número de PRs abertos, e o que ele entrega não tem essa urgência — atualizar
+> uma branch **não muda se ela conflita**; o conflito é o mesmo nos dois
+> sentidos do merge. Muda o tamanho do próximo merge. O ponto aqui é que
+> ninguém rebaseia à mão, não que acontece no mesmo segundo.
+>
+> E ele não resolve conflito, nem aqui nem na montagem do ambiente: pula e
+> segue. É a mesma regra nos dois lugares, e é o único ponto do processo onde
+> uma pessoa precisa entrar.
 
 **Mostrar:** o PR #2 de B, agora marcado como **out-of-date** pelo GitHub — o
 merge está bloqueado porque a `main` andou. (O job `sincronia com a main` diz a
@@ -380,7 +395,8 @@ Se travar o merge, use **Merge without waiting for requirements** (você é admi
 
 ### Um PR ficou para trás da `main`
 
-Normalmente o `sync-prs` resolve sozinho no push da `main`. Para forçar:
+O `sync-prs` roda uma vez por dia (06:00 UTC), então no palco ele é sempre
+manual. Para forçar:
 
 ```bash
 gh workflow run sync-prs.yml

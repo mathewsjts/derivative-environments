@@ -6,22 +6,50 @@
 # Quando a main anda, todo PR aberto fica desatualizado. Isso NAO impede a
 # branch de entrar em dev/hom -- a montagem sempre parte de origin/main e faz
 # merge da branch, entao uma branch atrasada entra normalmente enquanto nao
-# conflitar. O problema e outro, e e triplo:
+# conflitar.
 #
-#   1. Com `strict` ligado no ruleset da main, PR desatualizado nao mergeia.
-#      Sem automacao, cada push na main vira uma rodada de rebase manual.
-#   2. Os gates do PR (tsc, docker, Sonar) rodam sobre a arvore do PR. Branch
-#      atrasada e validada contra uma main que nao existe mais -- que e
-#      exatamente o "o Sonar reprova depois do merge" que este modelo ataca.
-#   3. Quanto mais a branch atrasa, maior a chance de ela conflitar com a main
-#      e ai sim ser excluida do ambiente.
+# Este cabecalho ja listou tres motivos. Eles nao envelheceram igual, e vale
+# corrigir o registro em vez de deixar o argumento mais forte do que a realidade:
+#
+#   1. "Com `strict` ligado, PR desatualizado nao mergeia."
+#      O `strict` esta DESLIGADO, por decisao escrita (SETUP.md, secao 3b):
+#      prevencao O(N x PRs abertos) trocada pela deteccao O(1) dos gates na
+#      main. Este motivo deixou de existir.
+#
+#   2. "Os gates do PR rodam sobre uma main que nao existe mais."
+#      Continua verdade e continua sendo beneficio real -- mas nao urgente. Os
+#      gates re-rodam no proximo push da branch de qualquer jeito, e agora a
+#      propria main tem CI (pr-gates em `push: [main]`) para pegar o que escapou
+#      da janela.
+#
+#   3. "Quanto mais a branch atrasa, mais provavel ela conflitar."
+#      ESTAVA FORTE DEMAIS. Este workflow faz `merge main -> branch`; o
+#      assemble-env.sh faz `merge branch -> main`. Mesma base de merge, mesmos
+#      dois commits: MESMO conflito. Atualizar a branch nao muda se ela conflita
+#      hoje. Muda o TAMANHO do proximo merge -- e antecipa a hora em que a
+#      pessoa descobre. E um beneficio menor, e de outra natureza.
+#
+# O QUE SOBRA -- E POR QUE ELE E DIARIO, E NAO REFLEXO DE PUSH
+#
+# Sobra "integre cedo, em pedacos pequenos". Beneficio real, incremental, e sem
+# urgencia: nao precisa acontecer a cada merge na main.
+#
+# Rodando a cada push na main, um merge amplificava em ate N runs (N = PRs
+# marcados): cada atualizacao e um push, cada push dispara os gates e uma
+# reconstrucao de ambiente. Rodando uma vez por dia -- 06:00 UTC, o mesmo
+# horario do label-ttl, antes de qualquer um comecar o dia -- a amplificacao cai
+# de O(merges x PRs) para O(1/dia).
+#
+# Quem precisa da atualizacao AGORA tem dois botoes que nao esperam o
+# agendamento: o "Update branch" do proprio PR, e este workflow em
+# workflow_dispatch.
 #
 # O QUE ELE FAZ
 #
-# A cada push na main, atualiza com o "Update branch" nativo do GitHub (merge da
-# main na branch) cada PR aberto QUE CARREGA ALGUMA LABEL deploy:*. Nao rebaseia
-# e nao faz force-push: quem tiver a branch localmente continua conseguindo dar
-# `git pull`.
+# Uma vez por dia (ou sob demanda), atualiza com o "Update branch" nativo do
+# GitHub (merge da main na branch) cada PR aberto QUE CARREGA ALGUMA LABEL
+# deploy:*. Nao rebaseia e nao faz force-push: quem tiver a branch localmente
+# continua conseguindo dar `git pull`.
 #
 # POR QUE SO OS MARCADOS (only_labeled, padrao true)
 #
@@ -31,23 +59,26 @@
 # desenho em escala real, e ela cresce com o numero de PRs abertos, nao com o
 # tamanho do time.
 #
-# Os tres motivos do bloco acima so valem AGORA para quem esta num ambiente:
+# E o que sobrou dos motivos so vale AGORA para quem esta dentro de um ambiente:
 #
-#   1. `strict` bloqueia o merge de PR desatualizado -- so importa quando o PR
-#      esta prestes a mergear, e ai o proprio autor clica em "Update branch".
-#   2. Gates rodando contra uma main que nao existe mais -- eles re-rodam no
+#   1. Gates rodando contra uma main que nao existe mais -- eles re-rodam no
 #      proximo push da branch de qualquer jeito.
-#   3. Branch atrasada tem mais chance de conflitar -- so importa para quem
-#      disputa espaco num conjunto.
+#   2. Merge menor da proxima vez -- so compensa para quem esta disputando
+#      espaco num conjunto e quer descobrir cedo que precisa rebasear.
+#
+# Para quem nao esta em ambiente nenhum, estar atrasado e inofensivo: a montagem
+# parte sempre da main (ver o primeiro paragrafo) e o merge do PR nao exige
+# estar em dia (o `strict` esta desligado).
 #
 # O QUE ISSO CUSTA, DITO EXPLICITAMENTE
 #
-# Um PR sem label que ganhar uma label depois so sera atualizado no PROXIMO push
-# na main -- aplicar a label nao dispara este workflow. Ate la ele pode estar
-# atrasado, e isso e inofensivo: a montagem parte sempre de origin/main e faz
-# merge da branch, entao estar atras nao exclui ninguem do ambiente (ver o
-# primeiro paragrafo). Quem quiser a atualizacao na hora tem dois botoes: o
-# "Update branch" do proprio PR, ou este workflow no modo manual.
+# Um PR sem label que ganhar uma label depois so sera atualizado no PROXIMO
+# disparo -- ou seja, ate 24h depois, porque aplicar a label nao dispara este
+# workflow. Ate la ele pode estar atrasado, e isso e inofensivo: a montagem
+# parte sempre de origin/main e faz merge da branch, entao estar atras nao
+# exclui ninguem do ambiente (ver o primeiro paragrafo). Quem quiser a
+# atualizacao na hora tem dois botoes: o "Update branch" do proprio PR, ou este
+# workflow no modo manual.
 #
 # Para atualizar TODO PR aberto (o comportamento antigo), rode manualmente com
 # a caixa `only_labeled` desmarcada.
@@ -58,17 +89,21 @@
 # segue para o proximo PR -- mesma regra do rebuild-env. Resolucao de conflito
 # contra a main e trabalho humano, feito uma vez, no PR.
 #
-# Nao comenta. Um PR que conflita com a main ja mostra isso de tres formas: o
-# banner de out-of-date, o ruleset bloqueando o merge, e o job "sincronia com a
-# main" com a mensagem explicando o rebase. Comentar a cada push na main seria
-# ruido -- e nao existe marca de estado aqui para deduplicar, como a
-# blocked:<env> faz no rebuild-env.
+# Nao comenta. Um PR que conflita com a main ja mostra isso de duas formas: o
+# banner de out-of-date do GitHub e o aviso do passo "sincronia com a main", com
+# a mensagem explicando o rebase. Comentar a cada execucao seria ruido -- e nao
+# existe marca de estado aqui para deduplicar, como a blocked:<env> faz no
+# rebuild-env.
 # ---------------------------------------------------------------------------
 name: sync-prs
 
 on:
-  push:
-    branches: [main]
+  # Diario, nao reflexo de push. Ver o cabecalho: o que sobrou deste workflow e
+  # "integre cedo, em pedacos pequenos", que nao tem urgencia nenhuma.
+  schedule:
+    # 06:00 UTC (03:00 em Sao Paulo), o mesmo horario do label-ttl.yml -- antes
+    # de qualquer um comecar o dia, e ja com a main de ontem inteira dentro.
+    - cron: "0 6 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -129,9 +164,9 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
-          # Em push na main nao existe `inputs`, entao o fallback e o padrao de
-          # verdade deste workflow. Desmarcar a caixa no disparo manual manda a
-          # string 'false', que e truthy na expressao e vence o fallback --
+          # Em disparo agendado nao existe `inputs`, entao o fallback e o padrao
+          # de verdade deste workflow. Desmarcar a caixa no disparo manual manda
+          # a string 'false', que e truthy na expressao e vence o fallback --
           # continua dando para atualizar TODO PR aberto de proposito.
           ONLY_LABELED: ${{ github.event.inputs.only_labeled || 'true' }}
         run: |

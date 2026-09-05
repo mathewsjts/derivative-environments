@@ -15,6 +15,7 @@ import { versionRouter } from './version';
 // que todo app Express/Nest/Fastify de verdade tem.
 // ===========================================================================
 // feature-imports:start
+import { usersRouter } from './users';
 // feature-imports:end
 
 // ===========================================================================
@@ -37,6 +38,7 @@ export function registerRoutes(app: Express): void {
   app.use('/version', versionRouter);
 
   // feature-routes:start
+  app.use('/users', usersRouter);
   // feature-routes:end
 
   // -------------------------------------------------------------------------

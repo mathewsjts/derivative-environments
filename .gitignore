@@ -8,3 +8,7 @@ dist/
 
 # estado local do assemble-env.sh quando rodado no laptop
 .rebuild-state.json
+
+# preferencias locais do Claude Code (allowlist de permissoes da maquina)
+.claude/settings.json
+.claude/settings.local.json

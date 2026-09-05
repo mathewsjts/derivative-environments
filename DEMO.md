@@ -106,7 +106,7 @@ gh pr edit 1 --add-label deploy:hom
 gh pr edit 3 --add-label deploy:hom
 ```
 
-**Enquanto o job roda (~90s), diga:**
+**Enquanto o job roda (~115s: 25s de janela de acomodação + a reconstrução), diga:**
 
 > Ninguém fez merge em `hom`. Ninguém abriu um PR para `hom`. O que essas duas
 > pessoas fizeram foi declarar uma **intenção**: "quero minha branch no próximo
@@ -145,7 +145,7 @@ rodou logo depois. (Se ele aparecer *skipped*, `ENABLE_FAKE_DEPLOY` não está
 gh pr edit 2 --add-label deploy:hom
 ```
 
-**Enquanto o job roda (~90s), diga:**
+**Enquanto o job roda (~115s: 25s de janela de acomodação + a reconstrução), diga:**
 
 > B registra a rota dela **no mesmo ponto** de `src/routes/index.ts` que A. As
 > duas conflitam. A pergunta que interessa é: o que acontece com `hom`?
@@ -316,7 +316,7 @@ git push -q
 git checkout -q main
 ```
 
-**Enquanto o job roda (~90s), diga:**
+**Enquanto o job roda (~115s: 25s de janela de acomodação + a reconstrução), diga:**
 
 > Não toquei em label nenhuma. Não abri PR nenhum. Não fiz cherry-pick de nada.
 > Um push na branch da feature, e os ambientes que contêm essa branch se
@@ -505,12 +505,19 @@ git show origin/hom:build-manifest.json | jq
 
 O resumo do job na aba Actions traz a mesma tabela, também sem esperar a Vercel.
 
-### Um run aparece "cancelado"
+### Um run aparece "cancelado", ou some sem reconstruir nada
 
-É esperado. `cancel-in-progress: true` por ambiente: se você clicar em duas
-labels rápido, a reconstrução mais nova cancela a anterior. Diga que é de
-propósito — a execução mais nova monta a partir da `main` de agora, então a
-anterior já nasceu obsoleta.
+É esperado, e são dois mecanismos diferentes.
+
+Se você aplicar duas labels rápido, o run mais antigo normalmente nem chega à
+fila: a **janela de acomodação** de 25s no job de decisão faz ele desistir
+sozinho, com o resumo dizendo "há N runs mais novos". Quem fica reconstrói os
+dois ambientes. Diga que é de propósito — a execução mais nova monta a partir da
+`main` de agora, então a anterior já nasceu obsoleta, e colapsar a rajada fora
+da fila é o que evita cinco minutos de job cancelado segurando o grupo.
+
+O `cancel-in-progress: true` por ambiente continua ali, para a rajada que
+atravessa a janela. Aí sim aparece um run cancelado — e pelo mesmo motivo.
 
 ### O job falhou no `npm audit`
 

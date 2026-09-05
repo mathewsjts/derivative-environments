@@ -90,6 +90,65 @@ check "a matriz vem do guard" \
 check "fail-fast desligado: um ambiente nao derruba o outro" \
   "$(job_block rebuild | grep -c 'fail-fast: false' || true)" "1"
 
+# ---------------------------------------------------------------------------
+# JANELA DE ACOMODACAO. O terceiro capitulo da mesma historia dos PRs #10 e #11,
+# e o primeiro em que o sintoma nao era ambiente parado, e sim fila travada.
+#
+# `cancel-in-progress` dispara na hora, mas quem e superado ANTES de rodar o
+# primeiro passo continua ocupando a fila pelo timeout de cancelamento inteiro:
+#
+#   run #225  reconstruir dev  cancelled  301s  ZERO passos executados
+#   run #188  reconstruir dev  cancelled  300s  ZERO passos executados
+#   job que de fato reconstroi:            22s  em media
+#
+# A correcao nao foi mexer no cancelamento: foi colapsar a rajada FORA do grupo,
+# no guard, onde esperar nao bloqueia ninguem e nao custa minuto faturado.
+#
+# As duas invariantes que sustentam isso, e as duas ja seriam bug silencioso:
+#
+#   1. A janela fica no guard. Migrada para dentro do job com grupo, ela vira
+#      exatamente o que veio consertar: espera dentro da fila.
+#   2. Quem desiste e coberto por quem fica. Se o run mais novo mantivesse a
+#      decisao ESTREITA dele, o ambiente que so o run descartado queria ficaria
+#      parado -- o PR #11 de novo, por outra porta. Por isso o alargamento.
+# ---------------------------------------------------------------------------
+echo
+echo "== janela de acomodacao =="
+
+check "a janela mora no guard, que nao tem grupo" \
+  "$(job_block guard | grep -c 'id: settle' || true)" "1"
+
+check "e NUNCA dentro do job com grupo -- seria a fila de novo" \
+  "$(job_block rebuild | grep -c 'sleep' || true)" "0"
+
+check "ela dorme antes de reivindicar a fila" \
+  "$(step_block "Janela de acomodacao" | grep -c 'sleep "\$SETTLE_SECONDS"' || true)" "1"
+
+check "e so e paga quando ha o que reconstruir" \
+  "$(step_block "Janela de acomodacao" | grep -c "if: steps.decide.outputs.any == 'true'" || true)" "1"
+
+check "quem tem run mais novo aberto desiste ANTES da fila" \
+  "$(step_block "Janela de acomodacao" | grep -c 'select(\. > \$me)' || true)" "1"
+
+check "e quem supera runs mais antigos ALARGA para todos os ambientes" \
+  "$(step_block "Janela de acomodacao" | grep -c 'matrix=\$MATRIX_ALL' || true)" "1"
+
+check "o decide publica o conjunto completo, insumo do alargamento" \
+  "$(job_block guard | grep -c 'matrixAll=' || true)" "1"
+
+check "os outputs do guard preferem a janela e caem no decide" \
+  "$(job_block guard | grep -c 'steps\.settle\.outputs\.matrix || steps\.decide\.outputs\.matrix' || true)" "1"
+
+# Falha de API nao pode virar ambiente parado: sem resposta, o run segue com a
+# decisao original. Redundante e barato; nao reconstruir e a falha silenciosa.
+check "a janela falha aberto se a API nao responder" \
+  "$(step_block "Janela de acomodacao" | grep -cF "open='[]'" || true)" "1"
+
+# Sem `actions: read` a consulta responde 403, a janela falha aberto e o ganho
+# some sem nada ficar vermelho -- a familia de erro deste arquivo.
+check "e tem a permissao que a consulta exige" \
+  "$(grep -c '^  actions: read$' "$WF")" "1"
+
 echo
 echo "== procedencia e publicacao =="
 

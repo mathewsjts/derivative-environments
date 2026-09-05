@@ -139,4 +139,7 @@ cat <<EOF
   recebem o comentario explicando que a resolucao NAO esta no PR deles.
 
   A gravacao expira sozinha quando #$PR_A ou #$PR_B fechar (label-ttl.yml).
+
+  A branch de trabalho nao serve mais para nada:
+    git checkout main && git branch -D rr/$PR_A-$PR_B
 EOF

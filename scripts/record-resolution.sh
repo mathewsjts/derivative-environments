@@ -33,6 +33,11 @@ REDO=false
 [ "${3:-}" = "--redo" ] && REDO=true
 
 RESOLUTIONS_REF="${RESOLUTIONS_REF:-env-resolutions}"
+
+# Caminho ABSOLUTO do script irmao. A branch de trabalho sai de origin/main, e
+# se estes scripts ainda nao estiverem na main (o PR que os traz aberto, por
+# exemplo), um `./scripts/publish-resolution.sh` relativo nao existe la.
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Absoluto de proposito: --git-path devolve caminho RELATIVO, e o
 # publish-resolution.sh faz cd para um tmpdir depois de calcular isto.
 RR_CACHE="$(git rev-parse --absolute-git-dir)/rr-cache"
@@ -91,7 +96,7 @@ if [ -z "$(git diff --name-only --diff-filter=U)" ]; then
   git commit --quiet --no-edit
   echo "  A resolucao deste conflito ja existe em $RESOLUTIONS_REF e foi aplicada."
   echo "  Para gravar OUTRA no lugar dela:"
-  echo "    ./scripts/record-resolution.sh $PR_A $PR_B --redo"
+  echo "    $SELF_DIR/record-resolution.sh $PR_A $PR_B --redo"
   echo
   echo "  Limpando a branch de trabalho."
   git checkout --quiet main
@@ -107,7 +112,7 @@ cat <<EOF
   qualquer lugar, e entao:
 
     git add <arquivos> && git commit --no-edit
-    ./scripts/publish-resolution.sh $PR_A $PR_B
+    $SELF_DIR/publish-resolution.sh $PR_A $PR_B
 
   A branch $WORK_BRANCH e lixo: o publish nao a usa, e nada dela chega em
   branch de feature nenhuma. O unico artefato e o rr-cache.

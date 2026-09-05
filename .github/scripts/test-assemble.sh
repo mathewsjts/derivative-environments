@@ -12,6 +12,7 @@
 #   4. duas execucoes seguidas produzem o MESMO SHA de ambiente
 #   5. o manifesto reflete o conjunto publicado
 #   6. nenhuma branch de feature carrega resolucao de conflito de outra
+#   7. priority:high inverte quem ganha a vaga -- e nada mais
 #
 # Rode antes de ensaiar a demo: ./.github/scripts/test-assemble.sh
 set -euo pipefail
@@ -80,10 +81,12 @@ CANDIDATES='[{"pr":1,"branch":"feat/a-user-endpoint","author":"ada"},
              {"pr":2,"branch":"feat/b-auth-endpoint","author":"grace"},
              {"pr":3,"branch":"feat/c-metrics-endpoint","author":"linus"}]'
 
-run_assemble() {
-  ENV_NAME=hom MAX_SET=5 STATE_FILE="$1" CANDIDATES_JSON="$CANDIDATES" \
+assemble() { # assemble <arquivo-de-estado> <candidatos-json>
+  ENV_NAME=hom MAX_SET=5 STATE_FILE="$1" CANDIDATES_JSON="$2" \
     bash "$REPO_ROOT/.github/scripts/assemble-env.sh" >/dev/null 2>&1
 }
+
+run_assemble() { assemble "$1" "$CANDIDATES"; }
 
 echo
 echo "== primeira montagem =="
@@ -171,6 +174,89 @@ check "culpa ainda e do PR #1 (A), nao do #2 (C)" \
   "$(jq -r '.excluded[0].conflictsWith' "$WORK/state5.json")" "1"
 check "A e C continuam publicados" \
   "$(jq -r '[.features[].pr] | join(",")' "$WORK/state5.json")" "1,2"
+
+echo
+echo "== priority:high inverte quem ganha a vaga =="
+# A razao da feature existir: sem a label, B (PR maior) sempre perde para A.
+# Se B for o ajuste critico, a unica saida hoje seria tirar deploy:* de A a mao.
+git checkout --quiet main
+B_PRIORITARIA='[{"pr":1,"branch":"feat/a-user-endpoint","author":"ada"},
+                {"pr":2,"branch":"feat/b-auth-endpoint","author":"grace","priority":1},
+                {"pr":3,"branch":"feat/c-metrics-endpoint","author":"linus"}]'
+assemble "$WORK/prio1.json" "$B_PRIORITARIA"
+check "B entra na frente, e C junto" \
+  "$(jq -r '[.features[].pr] | join(",")' "$WORK/prio1.json")" "2,3"
+check "agora quem fica de fora e A" \
+  "$(jq -r '[.excluded[].pr] | join(",")' "$WORK/prio1.json")" "1"
+check "a culpa e atribuida a B, que tomou a vaga" \
+  "$(jq -r '.excluded[0].conflictsWith' "$WORK/prio1.json")" "2"
+check "o build tem a rota de B" \
+  "$(git show "hom:src/routes/index.ts" | grep -c "authRouter")" "2"
+check "e NAO tem mais a de A" \
+  "$(git show "hom:src/routes/index.ts" | grep -c "usersRouter" || true)" "0"
+check "o manifesto registra a prioridade de B" \
+  "$(git show hom:build-manifest.json | jq -r '.features[0].priority')" "1"
+
+PRIO_HEAD1="$(jq -r '.envHead' "$WORK/prio1.json")"
+git checkout --quiet main
+assemble "$WORK/prio2.json" "$B_PRIORITARIA"
+check "com prioridade a montagem segue deterministica (mesmo SHA)" \
+  "$(jq -r '.envHead' "$WORK/prio2.json")" "$PRIO_HEAD1"
+
+echo
+echo "== prioridade decide a ORDEM, nao resolve conflito =="
+# Com as duas marcadas, o empate cai no numero do PR -- a regra de sempre, um
+# nivel acima. E a que perde continua saindo, prioritaria ou nao.
+git checkout --quiet main
+AMBAS_PRIORITARIAS='[{"pr":1,"branch":"feat/a-user-endpoint","author":"ada","priority":1},
+                     {"pr":2,"branch":"feat/b-auth-endpoint","author":"grace","priority":1},
+                     {"pr":3,"branch":"feat/c-metrics-endpoint","author":"linus"}]'
+assemble "$WORK/prio3.json" "$AMBAS_PRIORITARIAS"
+check "empate entre prioritarias: o PR menor fica com a vaga" \
+  "$(jq -r '[.features[].pr] | join(",")' "$WORK/prio3.json")" "1,3"
+check "a prioritaria que perdeu sai como qualquer outra" \
+  "$(jq -r '[.excluded[].pr] | join(",")' "$WORK/prio3.json")" "2"
+check "e o estado registra que ela ERA prioritaria" \
+  "$(jq -r '.excluded[0].priority' "$WORK/prio3.json")" "1"
+
+echo
+echo "== quem nao usa a label nao ganha campo novo no manifesto =="
+# Se `priority` aparecesse sempre, o descritor de todo ambiente ja publicado
+# mudaria e o primeiro rebuild depois desta feature republicaria dev e hom sem
+# nada ter mudado de verdade. A chave e omitida quando e 0 por causa disso.
+check "nenhuma feature de um conjunto sem prioridade tem a chave" \
+  "$(jq -r '[.features[] | has("priority")] | any' "$S1")" "false"
+check "nenhum excluido tambem" \
+  "$(jq -r '[.excluded[] | has("priority")] | any' "$S1")" "false"
+
+echo
+echo "== sem conflito, a label so reordena: ninguem entra nem sai =="
+git checkout --quiet main
+A_E_C='[{"pr":1,"branch":"feat/a-user-endpoint","author":"ada"},
+        {"pr":3,"branch":"feat/c-metrics-endpoint","author":"linus"}]'
+C_PRIORITARIA='[{"pr":1,"branch":"feat/a-user-endpoint","author":"ada"},
+                {"pr":3,"branch":"feat/c-metrics-endpoint","author":"linus","priority":1}]'
+assemble "$WORK/prio4.json" "$A_E_C"
+check "ordem natural: A antes de C" \
+  "$(jq -r '[.features[].pr] | join(",")' "$WORK/prio4.json")" "1,3"
+git checkout --quiet main
+assemble "$WORK/prio5.json" "$C_PRIORITARIA"
+check "com a label, C passa na frente" \
+  "$(jq -r '[.features[].pr] | join(",")' "$WORK/prio5.json")" "3,1"
+check "mas nenhuma das duas sai" \
+  "$(jq -r '.excluded | length' "$WORK/prio5.json")" "0"
+check "e as duas rotas continuam no ar" \
+  "$(git show hom:src/routes/index.ts | grep -cE "usersRouter|metricsRouter")" "4"
+
+echo
+echo "== tirar a label devolve exatamente o conjunto anterior =="
+# Reversibilidade ate o SHA: e o que garante que a label nao deixa residuo.
+git checkout --quiet main
+assemble "$WORK/prio6.json" "$CANDIDATES"
+check "sem a label, A volta e B sai de novo" \
+  "$(jq -r '[.features[].pr] | join(",")' "$WORK/prio6.json")" "1,3"
+check "e o SHA e o mesmo da primeira montagem do harness" \
+  "$(jq -r '.envHead' "$WORK/prio6.json")" "$HEAD1"
 
 echo
 echo "== bloco 5 da demo: A e mergeada na main =="

@@ -10,6 +10,19 @@
 // branch conta a mesma historia que o /version.
 import rawManifest from '../build-manifest.json';
 
+/**
+ * Posicao do PR na ordem de montagem. Ausente = 0 = normal; 1 = `priority:high`.
+ *
+ * A chave e OMITIDA quando e 0 de proposito: um conjunto sem prioridade nenhuma
+ * produz um manifesto identico ao de antes da feature existir, e a comparacao
+ * de conjunto do assemble-env.sh continua dando no-op em vez de republicar tudo
+ * uma vez so porque um campo novo apareceu.
+ *
+ * E um numero, e nao um booleano, para que um terceiro nivel (`priority:critical`
+ * = 2) seja uma linha de jq no assemble-env.sh, sem migrar manifesto publicado.
+ */
+export type Priority = number;
+
 export interface FeatureRef {
   /** Numero do PR que trouxe a feature. */
   pr: number;
@@ -17,6 +30,7 @@ export interface FeatureRef {
   /** SHA do tip da branch de feature no momento da montagem. */
   sha: string;
   author: string;
+  priority?: Priority;
 }
 
 export interface ExcludedRef {
@@ -29,6 +43,12 @@ export interface ExcludedRef {
   conflictsWith: number | null;
   /** Saida de `git diff --name-only --diff-filter=U`. */
   files: string[];
+  /**
+   * Um PR pode ser prioritario e AINDA ASSIM ficar de fora: prioridade decide
+   * ordem, nao resolve conflito. Uma branch atrasada em relacao a main conflita
+   * sozinha e sai, com ou sem a label.
+   */
+  priority?: Priority;
 }
 
 export interface BuildManifest {

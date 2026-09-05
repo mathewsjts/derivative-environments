@@ -49,7 +49,7 @@ log "voltar = $ORIGINAL_BRANCH"
 
 section "Labels"
 ./scripts/create-labels.sh >/dev/null
-log "deploy:dev deploy:hom blocked:dev blocked:hom"
+log "deploy:dev deploy:hom priority:high blocked:dev blocked:hom"
 
 # ---------------------------------------------------------------------------
 # --reset: derruba tudo para poder ensaiar a demo quantas vezes quiser.

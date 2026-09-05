@@ -103,6 +103,24 @@ check "nenhum push --force sem lease em nenhum workflow" \
   "$(grep -rhoE 'git push [^|&;]*--force(\s|$)' .github/workflows/ | grep -vc 'force-with-lease' || true)" "0"
 
 # ---------------------------------------------------------------------------
+# priority:high reordena o conjunto, entao aplica-la PRECISA reconstruir. Se o
+# guard parar de reconhecer a label, nada quebra e nada avisa: a label fica sem
+# efeito ate o proximo push na branch, e a feature parece simplesmente nao
+# funcionar. Por isso o gatilho e uma invariante, e nao so um teste do assemble.
+# ---------------------------------------------------------------------------
+echo
+echo "== gatilho do priority:high =="
+
+check "o guard reconhece priority:high" \
+  "$(job_block guard | grep -c 'CHANGED_LABEL" = "priority:high"' || true)" "1"
+
+check "e decide pelas labels do PR, sem chamada de API a mais" \
+  "$(job_block guard | grep -c 'PR_LABELS' || true)" "2"
+
+check "o filtro de blocked:* continua vindo antes de tudo" \
+  "$(job_block guard | grep -c 'blocked:\*)' || true)" "1"
+
+# ---------------------------------------------------------------------------
 # pr-gates: a main passou a ter CI, e com ela um evento onde
 # `github.event.pull_request.number` e VAZIO.
 #

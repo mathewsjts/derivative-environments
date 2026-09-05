@@ -78,13 +78,22 @@ gh secret list          # esperado: APP_ID, APP_PRIVATE_KEY
 
 ## 2. Labels
 
-Quatro labels, duas famílias com papéis bem diferentes:
+Cinco labels, duas famílias com papéis bem diferentes:
 
-- `deploy:dev` / `deploy:hom` — **intenção**, aplicada por pessoas.
-  "Quero esta branch no conjunto deste ambiente."
-- `blocked:dev` / `blocked:hom` — **estado**, aplicada e removida só pelo job.
-  É o único "banco de dados" do modelo: é por causa dela que o job sabe se já
-  comentou um conflito, sem guardar estado em lugar nenhum. **Não aplique a mão.**
+**Intenção** — aplicada por pessoas:
+
+- `deploy:dev` / `deploy:hom` — "quero esta branch no conjunto deste ambiente."
+- `priority:high` — "em caso de conflito, esta branch entra antes das outras."
+  É **global**: vale em todo ambiente onde o PR já tem `deploy:*`. Sozinha não
+  faz nada — sem `deploy:*` o PR nem é candidato. E ela **não resolve conflito**,
+  só decide quem fica com a vaga: o perdedor sai do ambiente até o conflito
+  deixar de existir, exatamente como qualquer outra exclusão.
+
+**Estado** — aplicada e removida só pelo job:
+
+- `blocked:dev` / `blocked:hom` — é o único "banco de dados" do modelo: é por
+  causa dela que o job sabe se já comentou um conflito, sem guardar estado em
+  lugar nenhum. **Não aplique a mão.**
 
 ```bash
 ./scripts/create-labels.sh
@@ -441,7 +450,7 @@ gh variable set ENABLE_FAKE_DEPLOY --body false    # depois
 ```bash
 gh secret list        # APP_ID, APP_PRIVATE_KEY, SONAR_TOKEN
 gh variable list      # VERCEL_URL_DEV, VERCEL_URL_HOM, ENABLE_FAKE_DEPLOY=true
-gh label list         # deploy:dev, deploy:hom, blocked:dev, blocked:hom
+gh label list         # deploy:dev, deploy:hom, priority:high, blocked:dev, blocked:hom
 gh ruleset list       # 2 rulesets ativos
 
 ./.github/scripts/test-assemble.sh   # a montagem, offline, ~5s

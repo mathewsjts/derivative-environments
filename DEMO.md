@@ -11,6 +11,7 @@
 | 1 | Estado inicial | 2 min | plateia viu `hom` = `main` |
 | 2 | Montar `hom` ao vivo | 3 min | `/version` mostra `main + a + c` |
 | 3 | O conflito de B | 4 min | comentário lido em voz alta |
+| 3b | _(opcional)_ B é crítica: `priority:high` | 2 min | `hom` inverte, A sai |
 | 4 | Push de correção em A | 3 min | reconstruiu sem re-labelar nada |
 | 5 | Merge de A na `main` | 4 min | B volta, comentário "✅" |
 | 6 | O gate antes da `main` | 2 min | PR de lint vermelho |
@@ -181,6 +182,50 @@ linha:
 
 ---
 
+## 3b. _(opcional)_ B é crítica: `priority:high` — 2 min
+
+> Corte este bloco primeiro se estiver atrasado. Ele responde à pergunta que a
+> plateia costuma fazer no bloco 3 — **"e se a branch que ficou de fora for a
+> importante?"** — então vale ter na manga mesmo sem apresentar.
+
+**Fazer:**
+
+```bash
+gh pr edit 2 --add-label priority:high
+```
+
+**Enquanto o job roda, diga:**
+
+> Até agora a ordem foi o número do PR: quem abriu antes entra antes. É estável
+> e ninguém precisa negociar. Mas é cega ao que ficou de fora — se B for o
+> ajuste crítico que precisa ser testado hoje, ela está presa atrás de um PR
+> mais antigo, e a única saída seria tirar a label de A na mão.
+
+**Mostrar:** `/version` de `hom` — agora **`main + b + c`**, e é **A** que
+aparece em `excluded`, com `conflictsWith` apontando para o PR #2.
+
+**Mostrar:** o comentário no PR #1, que diz *contra quem* e *por quê*:
+
+> **Conflitou com:** #2 `feat/b-auth-endpoint` (@grace) — marcada com
+> `priority:high`, por isso entrou no conjunto antes da sua.
+
+> Repare no que **não** mudou. Nenhuma branch foi tocada. A label não resolve
+> conflito nenhum: ela decide quem fica com a vaga. A que perde sai do ambiente
+> e volta sozinha quando o conflito deixar de existir — o mesmo mecanismo do
+> bloco 3, com os papéis trocados.
+
+**Fazer, para voltar ao estado do bloco 3** (necessário para o bloco 4 seguir o
+roteiro):
+
+```bash
+gh pr edit 2 --remove-label priority:high
+```
+
+> E some sem deixar resíduo: tirar a label devolve **o mesmo SHA** de ambiente
+> de antes. Prioridade é ordenação, não um estado que alguém precisa limpar.
+
+---
+
 ## 4. Push de correção em A — 3 min
 
 > Este é o bloco que mata o cherry-pick do processo atual.
@@ -338,10 +383,14 @@ gh pr create --base main --head feat/d-lint-error \
 
 E o que eu deliberadamente **não** construí:
 
-> Sem `git rerere`, sem fila de prioridade entre branches, sem merge queue, sem
+> Sem `git rerere`, sem fila de prioridade com pesos, sem merge queue, sem
 > ambiente efêmero por PR. Todas são otimizações para problemas cuja frequência
 > a gente ainda não mediu. Este modelo é o mínimo que resolve o que dói hoje —
 > e é ele que vai gerar o número que justifica (ou não) a próxima peça.
+>
+> A `priority:high` é o exemplo de como a próxima peça entra: o problema
+> apareceu, e ela custou uma expressão de ordenação. Dois níveis, sem fila para
+> administrar.
 
 ---
 
@@ -429,6 +478,19 @@ apaga branch: só devolve as vagas.
 gh pr edit <N> --remove-label blocked:hom
 gh workflow run rebuild-env.yml -f environment=hom
 ```
+
+### O ambiente está com a feature "errada" dentro
+
+Provavelmente sobrou um `priority:high` do bloco 3b. Ele inverte a ordem, então
+o conjunto publicado fica diferente do que o roteiro dos blocos 4 e 5 espera:
+
+```bash
+gh pr list --label priority:high            # quem está furando a fila
+gh pr edit <N> --remove-label priority:high # a remoção já dispara a reconstrução
+```
+
+Tirar a label devolve exatamente o SHA de ambiente anterior — não precisa
+reconstruir na mão nem limpar mais nada.
 
 ### Recomeçar a demo do zero
 

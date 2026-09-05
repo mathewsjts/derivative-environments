@@ -107,9 +107,16 @@ while read -r row; do
     continue
   fi
 
+  # Quando o vencedor entrou antes por causa de priority:high, dizer isso e o
+  # que separa "o modelo tem uma regra" de "meu PR sumiu sem explicacao": ele
+  # entrava ontem e hoje nao entra, e nada na branch dele mudou.
   if [ -n "$against" ]; then
     against_txt="$(jq -r --argjson n "$against" \
-      '.features[] | select(.pr == $n) | "#\(.pr) `\(.branch)` (@\(.author))"' "$STATE_FILE")"
+      '.features[] | select(.pr == $n)
+       | "#\(.pr) `\(.branch)` (@\(.author))"
+         + (if (.priority // 0) > 0
+            then " — marcada com `priority:high`, por isso entrou no conjunto antes da sua"
+            else "" end)' "$STATE_FILE")"
   else
     against_txt="a própria \`main\` — sua branch está desatualizada em relação a ela"
   fi
@@ -144,6 +151,8 @@ O que acontece sozinho, sem você fazer nada:
   **uma vez**, contra código real e já revisado.
 - Se o outro PR for **fechado** ou **perder a label \`$DEPLOY_LABEL\`**, sua branch
   volta ao conjunto na próxima reconstrução e você recebe um comentário avisando.
+- Se ele estiver na frente por **\`priority:high\`** e perder essa label, a ordem
+  volta a ser a do número do PR e sua branch retorna do mesmo jeito.
 
 Seu PR segue válido: os gates rodam, o review acontece aqui, e a \`main\` continua
 sendo o único caminho para produção.

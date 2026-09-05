@@ -2,7 +2,7 @@ import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 
 import { createApp } from '../src/app';
-import { summarize, type BuildManifest } from '../src/manifest';
+import { resolvedFeatures, summarize, type BuildManifest } from '../src/manifest';
 
 const app = createApp();
 
@@ -55,5 +55,45 @@ describe('summarize', () => {
         excluded: [],
       }),
     ).toBe('main');
+  });
+});
+
+describe('resolvedFeatures', () => {
+  const base = {
+    environment: 'hom',
+    base: { branch: 'main', sha: 'abc' },
+    previousEnvHead: null,
+    excluded: [],
+  };
+
+  it('separa quem so esta no ar por uma resolucao gravada', () => {
+    const manifest: BuildManifest = {
+      ...base,
+      resolutions: { ref: 'env-resolutions', sha: 'deadbee' },
+      features: [
+        { pr: 1, branch: 'feat/a-user-endpoint', sha: 'aaa', author: 'x' },
+        {
+          pr: 2,
+          branch: 'feat/b-auth-endpoint',
+          sha: 'bbb',
+          author: 'y',
+          resolvedBy: ['src/routes/index.ts'],
+          conflictsWith: 1,
+        },
+      ],
+    };
+
+    expect(resolvedFeatures(manifest).map((f) => f.pr)).toEqual([2]);
+  });
+
+  it('um conjunto sem resolucao nenhuma devolve lista vazia', () => {
+    const manifest: BuildManifest = {
+      ...base,
+      features: [{ pr: 1, branch: 'feat/a-user-endpoint', sha: 'aaa', author: 'x' }],
+    };
+
+    expect(resolvedFeatures(manifest)).toEqual([]);
+    // A ausencia da chave e o que mantem o descritor do ambiente estavel.
+    expect(manifest.resolutions).toBeUndefined();
   });
 });

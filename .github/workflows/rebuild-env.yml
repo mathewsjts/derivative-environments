@@ -29,6 +29,14 @@ on:
     # dev e hom sao SAIDA deste job, nunca entrada -- ignorar as duas evita o
     # laco infinito. A main NAO esta na lista de proposito: mergear na main e
     # justamente o que precisa redisparar a reconstrucao dos dois ambientes.
+    #
+    # env-resolutions tambem nao esta na lista, mas por outro motivo, e vale
+    # dizer para ninguem procurar bug onde nao tem: em evento `push` o Actions
+    # le os workflows do COMMIT DA BRANCH QUE RECEBEU O PUSH, e aquele ref e
+    # orfao -- so rr-cache/, sem .github/workflows/. Nao existe workflow la para
+    # disparar. Quem dispara a reconstrucao depois de gravar ou expirar uma
+    # resolucao e um `gh workflow run` explicito, no publish-resolution.sh e no
+    # label-ttl.yml.
     branches-ignore: [dev, hom]
 
   # pull_request_target, e nao pull_request. A diferenca nao e cosmetica:
@@ -81,6 +89,12 @@ on:
 permissions:
   contents: read
   pull-requests: read
+
+# Uma fonte so para o nome do ref: o guard decide por ele e o assemble-env.sh le
+# dele. Divergir os dois faria a gravacao de uma resolucao disparar a
+# reconstrucao de um ref que o script nao carrega -- ou o contrario.
+env:
+  RESOLUTIONS_REF: env-resolutions
 
 jobs:
   # -------------------------------------------------------------------------
@@ -149,6 +163,7 @@ jobs:
           # payload: nenhuma chamada de API a mais para descobrir.
           # Vazio em push e workflow_dispatch, que nao tem pull_request.
           PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          RESOLUTIONS_REF: ${{ env.RESOLUTIONS_REF }}
         run: |
           set -euo pipefail
 
@@ -195,6 +210,24 @@ jobs:
                 # A base mudou: os DOIS ambientes sao derivados dela.
                 wanted=true
                 reason="push na main: a base mudou"
+              elif [ "$REF_NAME" = "$RESOLUTIONS_REF" ]; then
+                # NA PRATICA ESTE RAMO NAO E ALCANCADO HOJE, e ele fica aqui de
+                # proposito. O ref e orfao e nao carrega .github/workflows/,
+                # entao o push nele nao dispara workflow nenhum (ver o
+                # comentario do gatilho `push`). O disparo real e o
+                # `gh workflow run` do publish-resolution.sh e do label-ttl.yml.
+                #
+                # Ele fica porque a DECISAO esta certa e a forma do ref pode
+                # mudar: se alguem ramificar env-resolutions da main um dia, o
+                # evento passa a chegar e a resposta ja e a correta. Apagar
+                # significaria redescobrir, no palco, que gravar uma resolucao
+                # nao reconstroi nada.
+                #
+                # Os dois ambientes, porque o ref e indexado por CONFLITO e nao
+                # por ambiente: ele nao sabe a qual dos dois a resolucao se
+                # aplica. Quem nao usa nenhuma conclui no-op.
+                wanted=true
+                reason="push em $RESOLUTIONS_REF: as resolucoes gravadas mudaram"
               else
                 n=$(gh pr list --state open --base main --head "$REF_NAME" \
                       --label "deploy:$env_name" --json number --jq 'length')
@@ -457,6 +490,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
+          RESOLUTIONS_REF: ${{ env.RESOLUTIONS_REF }}
         run: ${{ steps.derive.outputs.dir }}/assemble-env.sh
 
       - name: Resumo da montagem
@@ -472,8 +506,15 @@ jobs:
             echo ""
             echo "| | PR | branch | autor |"
             echo "|---|---|---|---|"
-            jq -r '.features[] | "| ✅ | #\(.pr) | `\(.branch)` | @\(.author) |"' "$STATE_FILE"
+            jq -r '.features[]
+                   | (if has("resolvedBy") then "⚠️" else "✅" end) as $i
+                   | "| \($i) | #\(.pr) | `\(.branch)` | @\(.author) |"' "$STATE_FILE"
             jq -r '.excluded[] | "| ⛔ | #\(.pr) | `\(.branch)` | @\(.author) |"' "$STATE_FILE"
+            if [ "$(jq -r '.resolutions // "null"' "$STATE_FILE")" != "null" ]; then
+              echo ""
+              echo "⚠️ = entrou por uma resolução gravada em \`$(jq -r '.resolutions.ref' "$STATE_FILE")\`"
+              echo "@ \`$(jq -r '.resolutions.sha[0:7]' "$STATE_FILE")\` — esse código não está em nenhum PR."
+            fi
             echo ""
             echo "- base \`main\` = \`$(jq -r '.base.sha' "$STATE_FILE")\`"
             echo "- HEAD de \`${ENV_NAME}\` = \`$(jq -r '.envHead' "$STATE_FILE")\`"

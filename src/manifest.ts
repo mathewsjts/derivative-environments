@@ -31,6 +31,22 @@ export interface FeatureRef {
   sha: string;
   author: string;
   priority?: Priority;
+  /**
+   * Arquivos que so mergearam porque uma resolucao gravada (git rerere) foi
+   * aplicada. Presente = esta feature CONFLITA com outra do conjunto e entrou
+   * mesmo assim.
+   *
+   * Ausente quando vazia, pelo mesmo motivo de `priority`: um conjunto sem
+   * resolucao nenhuma produz um descritor byte a byte igual ao de antes desta
+   * feature existir, e o teste de "nada mudou" continua dando no-op.
+   *
+   * O que ele NAO significa: que o codigo resolvido esta em algum PR. Ele nao
+   * esta em lugar nenhum alem da montagem deste ambiente -- e por isso que o
+   * comentario do notify.sh existe.
+   */
+  resolvedBy?: string[];
+  /** PR com o qual esta feature conflita, quando entrou por resolucao. */
+  conflictsWith?: number | null;
 }
 
 export interface ExcludedRef {
@@ -67,6 +83,15 @@ export interface BuildManifest {
    * conjunto antigo, silenciosamente. Este campo torna cada transicao unica.
    */
   previousEnvHead: string | null;
+  /**
+   * De onde vieram as resolucoes aplicadas nesta montagem.
+   *
+   * Ausente quando nenhuma feature dependeu de resolucao -- os dois lados dessa
+   * condicao sao necessarios (ver a secao 6 do assemble-env.sh): presente,
+   * regravar a resolucao do mesmo par republica o ambiente; ausente, gravar uma
+   * resolucao para um par que nao esta aqui nao republica nada.
+   */
+  resolutions?: { ref: string; sha: string };
   features: FeatureRef[];
   excluded: ExcludedRef[];
 }
@@ -82,4 +107,15 @@ export function loadManifest(): BuildManifest {
 export function summarize(manifest: BuildManifest): string {
   const parts = [manifest.base.branch, ...manifest.features.map((f) => f.branch)];
   return parts.join(' + ');
+}
+
+/**
+ * As features que so estao no ar por causa de uma resolucao gravada.
+ *
+ * O /version expoe isso separado porque e a unica coisa neste build que nao
+ * corresponde a nenhum PR: o resto do ambiente e reproduzivel abrindo os PRs
+ * listados em `features`.
+ */
+export function resolvedFeatures(manifest: BuildManifest): FeatureRef[] {
+  return manifest.features.filter((f) => (f.resolvedBy?.length ?? 0) > 0);
 }

@@ -226,6 +226,82 @@ gh pr edit 2 --remove-label priority:high
 
 ---
 
+## 3c. _(opcional)_ A e B ao mesmo tempo: resolução gravada — 3 min
+
+> Corte junto com o 3b se estiver atrasado. Este bloco responde à **segunda**
+> pergunta que a plateia faz no bloco 3 — *"e se eu precisar testar as duas ao
+> mesmo tempo, com dois QAs diferentes?"* — que é a pergunta de quem tem um
+> ambiente só e não vai ganhar outro.
+
+**Diga primeiro, antes de tocar em qualquer coisa:**
+
+> A e B conflitam. Isso quer dizer, literalmente, que **não existe uma versão do
+> código com as duas** — a menos que alguém escreva uma terceira. A pergunta não
+> é se ela existe. É **onde ela mora**.
+>
+> Se ela morar numa branch de integração, voltamos ao problema do começo: uma
+> branch de longa duração com commits que não existem em lugar nenhum. E pior —
+> ela apodrece, porque um push na branch de A não chega mais no ambiente.
+>
+> Se ela morar dentro da branch de B, B passa a carregar código de uma feature
+> que talvez nunca seja mergeada, e esse código viaja até a produção.
+>
+> A terceira opção é a resolução não morar em branch nenhuma: virar **entrada da
+> montagem**.
+
+**Fazer** — resolver uma vez, na sua máquina:
+
+```bash
+./scripts/record-resolution.sh 1 2
+# ele para aqui, com o conflito na sua frente
+$EDITOR src/routes/index.ts        # mantém as duas rotas
+git add src/routes/index.ts && git commit --no-edit
+./scripts/publish-resolution.sh 1 2
+```
+
+**Enquanto o job roda, diga:**
+
+> O que eu acabei de publicar não é um commit de código. É o `rr-cache` do
+> `git rerere` — a memória de "quando esse conflito exato aparecer, resolva
+> assim". O script dispara a reconstrução no fim.
+
+**Mostrar:** `/version` de `hom` — agora **`main + a + b + c`**, `excluded`
+vazio, e um campo `resolutions` apontando para o ref. A feature de B traz
+`resolvedBy: ["src/routes/index.ts"]`.
+
+**Mostrar:** `git log --oneline main..feat/b-auth-endpoint` — **um commit só**.
+
+> Nenhuma branch foi tocada. Os dois QAs abrem a mesma URL e testam em paralelo.
+
+**Mostrar:** o comentário novo no PR #2, e pare nesta linha:
+
+> ### **"Essa resolução NÃO está no seu PR — e não vai para produção."**
+>
+> É a mesma disciplina do bloco 3, do outro lado. Lá o comentário impedia alguém
+> de resolver conflito numa branch de feature. Aqui ele impede alguém de achar
+> que o problema acabou. A resolução é entrada da montagem de `hom`; o merge na
+> `main` continua sendo o PR revisado, e nada mais.
+
+**Se perguntarem "e se A mudar aquele trecho?"** — é a pergunta certa, e a
+resposta é a que torna isso aceitável:
+
+> A chave da gravação é o hash do texto em conflito. Se qualquer uma das duas
+> mexer ali, ela deixa de casar e B volta a ficar de fora, com o comentário de
+> sempre. **Falha para o lado seguro.** Uma resolução nunca é aplicada a um
+> código que ela não viu.
+
+**Fazer, para voltar ao estado do bloco 3** (necessário para o bloco 4 seguir o
+roteiro):
+
+```bash
+git push origin --delete env-resolutions
+```
+
+> E some sem deixar resíduo, igual à `priority:high`: o ambiente volta ao **mesmo
+> SHA** de antes. Nem branch, nem ambiente, nem label guardam nada.
+
+---
+
 ## 4. Push de correção em A — 3 min
 
 > Este é o bloco que mata o cherry-pick do processo atual.
@@ -472,6 +548,23 @@ gh workflow run reset-env.yml -f environment=hom -f dry_run=true   # só listar
 Serve para voltar ao estado do bloco 1 sem recriar PR nenhum. Não fecha PR, não
 apaga branch: só devolve as vagas.
 
+### Uma resolução gravada ficou de um ensaio anterior
+
+Sintoma: B entra em `hom` sem você ter feito nada, e o `/version` traz um campo
+`resolutions`. É o `env-resolutions` de um ensaio que não foi limpo — e note que
+**fechar os PRs e recriar as branches não resolve**, porque a chave da gravação é
+o conteúdo do conflito, não o PR.
+
+```bash
+git ls-remote origin refs/heads/env-resolutions   # existe?
+git push origin --delete env-resolutions          # zera o remoto
+rm -rf "$(git rev-parse --absolute-git-dir)/rr-cache"   # e o cache local
+gh workflow run rebuild-env.yml -f environment=hom
+```
+
+O ambiente volta ao **mesmo SHA** de antes da gravação — não há resíduo em
+branch, label ou manifesto. O `seed-demo.sh --reset` já faz os três passos.
+
 ### Um PR ficou com `blocked:hom` de um ensaio anterior
 
 ```bash
@@ -499,8 +592,18 @@ reconstruir na mão nem limpar mais nada.
 ./scripts/seed-demo.sh
 ```
 
-Fecha os PRs, apaga as branches de feature e os ambientes, e recria tudo. Leva
-cerca de um minuto contando a primeira reconstrução.
+Fecha os PRs, apaga as branches de feature e os ambientes, apaga as resoluções
+gravadas, e recria tudo. Leva cerca de um minuto contando a primeira
+reconstrução.
+
+> **Por que a resolução precisa ser apagada explicitamente**, se os PRs foram
+> fechados e as branches recriadas: o `rr-cache` é indexado pelo **conteúdo** do
+> conflito, não pelo número do PR. O seed recria as branches com exatamente as
+> mesmas inserções, então o conflito reproduzido tem o **mesmo** preimage — e uma
+> gravação de um ensaio anterior volta a se aplicar sozinha, nos PRs novos.
+> Verificado: mesmas branches recriadas do zero, SHAs e PRs diferentes, mesma
+> chave `b03c075d…`. Sem essa limpeza a demo começaria com B já dentro de `hom`
+> e o bloco 3 — o conflito — simplesmente não aconteceria.
 
 ### Nada funciona e o tempo está acabando
 

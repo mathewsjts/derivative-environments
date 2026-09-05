@@ -9,7 +9,15 @@
 #   entrou em conflito e nao tinha a marca -> comenta uma vez, aplica a marca
 #   continua em conflito                   -> silencio absoluto
 #   voltou para o conjunto                 -> comenta "voltou", remove a marca
+#   entrou por uma resolucao gravada       -> comenta uma vez, SEM marca
+#   segue entrando por resolucao           -> silencio absoluto
 #   saiu do conjunto por outro motivo      -> remove a marca, sem comentar
+#
+# O estado "resolved" nao tem label, e isso e deliberado: blocked:<env> quer
+# dizer FORA do ambiente, e quem entra por resolucao esta dentro. Marcar seria
+# tornar a label uma mentira e quebrar a limpeza de marcas orfas da secao 3. A
+# memoria dele e o marcador invisivel no comentario -- que ja e a memoria de
+# verdade do sistema; a label sempre foi o atalho barato para o caso comum.
 #
 # Sem isso, um job que roda a cada push transforma um conflito de meio dia em
 # 40 comentarios e as pessoas param de ler os comentarios do bot.
@@ -22,7 +30,11 @@ ENV_URL="${ENV_URL:-}"
 
 BLOCKED_LABEL="blocked:$ENV_NAME"
 DEPLOY_LABEL="deploy:$ENV_NAME"
-REPO="${GH_REPO:-$(gh repo view --json nameWithOwner --jq .nameWithOwner)}"
+if [ "$DRY_RUN" = "true" ]; then
+  REPO="${GH_REPO:-dry-run/dry-run}"
+else
+  REPO="${GH_REPO:-$(gh repo view --json nameWithOwner --jq .nameWithOwner)}"
+fi
 
 log() { printf '  %s\n' "$*" >&2; }
 
@@ -51,10 +63,17 @@ remove_label() {
 marker() { printf '<!-- rebuild-env:%s:%s -->' "$ENV_NAME" "$1"; }
 
 last_commented_state() {
+  # Gancho de teste, no mesmo espirito do CANDIDATES_JSON do assemble-env.sh:
+  # um mapa {"<pr>": "conflict|back|resolved"} substitui a leitura dos
+  # comentarios, e a maquina de estados inteira roda sem GitHub.
+  if [ -n "${COMMENT_STATE_JSON:-}" ]; then
+    jq -r --arg n "$1" '.[$n] // empty' <<<"$COMMENT_STATE_JSON"
+    return 0
+  fi
   gh api "repos/$REPO/issues/$1/comments?per_page=100" --paginate --jq '.[].body' 2>/dev/null \
-    | grep -oE "<!-- rebuild-env:${ENV_NAME}:(conflict|back) -->" \
+    | grep -oE "<!-- rebuild-env:${ENV_NAME}:(conflict|back|resolved) -->" \
     | tail -1 \
-    | sed -E 's/.*:(conflict|back) -->/\1/'
+    | sed -E 's/.*:(conflict|back|resolved) -->/\1/'
 }
 
 post_comment() {
@@ -66,8 +85,21 @@ post_comment() {
 }
 
 # Uma unica chamada para saber quem carrega a marca hoje.
-BLOCKED_NOW="$(gh pr list --state open --label "$BLOCKED_LABEL" --limit 100 --json number --jq '[.[].number]')"
+if [ -n "${BLOCKED_JSON:-}" ]; then
+  BLOCKED_NOW="$BLOCKED_JSON"
+else
+  BLOCKED_NOW="$(gh pr list --state open --label "$BLOCKED_LABEL" --limit 100 --json number --jq '[.[].number]')"
+fi
 has_mark() { jq -e --argjson n "$1" 'index($n) != null' <<<"$BLOCKED_NOW" >/dev/null; }
+
+# Quem dependia de resolucao na publicacao ANTERIOR. E o que permite detectar a
+# transicao "entrava por resolucao -> agora entra limpo", que nenhuma label
+# registra: a resolucao deixou de ser necessaria porque o outro PR mergeou.
+RESOLVED_BEFORE="$(jq -c '.resolvedBefore // []' "$STATE_FILE")"
+was_resolved() { jq -e --argjson n "$1" 'index($n) != null' <<<"$RESOLVED_BEFORE" >/dev/null; }
+
+RES_REF="$(jq -r '.resolutions.ref // ""' "$STATE_FILE")"
+RES_SHA="$(jq -r '.resolutions.sha // ""' "$STATE_FILE")"
 
 # Linha "main + feat/x + feat/y" reaproveitada dos dois comentarios.
 SUMMARY="$(jq -r '[.base.branch] + [.features[].branch] | join(" + ")' "$STATE_FILE")"
@@ -169,39 +201,135 @@ BODY_EOF
 done < <(jq -c '.excluded[]' "$STATE_FILE")
 
 # ---------------------------------------------------------------------------
-# 2. Quem voltou para o conjunto.
+# 2. Quem esta DENTRO do conjunto -- e em que condicao.
+#
+# Duas situacoes moram aqui, e confundi-las seria mentir para o autor:
+#
+#   entrou limpo         -> ✅ o conflito acabou de verdade
+#   entrou por resolucao -> ⚠️ o conflito CONTINUA existindo; o que mudou e que
+#                           ha uma resolucao gravada que o job aplica. Dizer
+#                           "o conflito nao existe mais" aqui seria falso, e o
+#                           autor precisa saber que ha codigo rodando em
+#                           $ENV_NAME que NAO esta no PR dele.
+#
+# Custo de API: so consulta o historico de comentarios quem PODE ter mudado de
+# estado -- quem carrega a marca, quem entra por resolucao agora, e quem
+# entrava por resolucao na publicacao anterior. Um PR que entrou limpo e sempre
+# esteve limpo nao custa nada.
 # ---------------------------------------------------------------------------
 while read -r row; do
   [ -n "$row" ] || continue
   pr="$(jq -r '.pr' <<<"$row")"
   branch="$(jq -r '.branch' <<<"$row")"
 
-  has_mark "$pr" || continue
+  is_resolved=false
+  jq -e 'has("resolvedBy")' <<<"$row" >/dev/null 2>&1 && is_resolved=true
+  marked=false; has_mark "$pr" && marked=true
+  before=false; was_resolved "$pr" && before=true
 
-  if [ "$(last_commented_state "$pr")" = "back" ]; then
-    log "#$pr ja tinha sido avisado do retorno -> so removendo a marca"
-    remove_label "$pr" "$BLOCKED_LABEL"
+  # O caso esmagadoramente comum: entrou limpo, nunca esteve fora, nunca
+  # dependeu de resolucao. Silencio, sem uma chamada de API.
+  if [ "$is_resolved" = false ] && [ "$marked" = false ] && [ "$before" = false ]; then
     continue
+  fi
+
+  state="$(last_commented_state "$pr")"
+
+  # -------------------------------------------------------------------------
+  # 2a. Entrou por uma resolucao gravada.
+  # -------------------------------------------------------------------------
+  if [ "$is_resolved" = true ]; then
+    if [ "$state" = "resolved" ]; then
+      log "#$pr segue entrando por resolucao -> silencio"
+      if [ "$marked" = true ]; then remove_label "$pr" "$BLOCKED_LABEL"; fi
+      continue
+    fi
+
+    against="$(jq -r '.conflictsWith // empty' <<<"$row")"
+    if [ -n "$against" ] && [ "$against" != "null" ]; then
+      against_txt="$(jq -r --argjson n "$against" \
+        '.features[] | select(.pr == $n) | "#\(.pr) `\(.branch)` (@\(.author))"' "$STATE_FILE")"
+    else
+      against_txt="a própria \`main\`"
+    fi
+    rr_files="$(jq -r '.resolvedBy[] | "- `" + . + "`"' <<<"$row")"
+
+    BODY="$(cat <<BODY_EOF
+### ⚠️ Dentro de \`$ENV_NAME\`, por uma resolução gravada
+
+\`$branch\` conflita com $against_txt — e mesmo assim entrou no conjunto
+publicado em \`$ENV_NAME\`. O job aplicou uma **resolução gravada** por alguém do
+time, que mora fora das branches: \`$RES_REF\` @ \`${RES_SHA:0:7}\`.
+
+**Arquivos que a resolução reconciliou:**
+$rr_files
+
+Conjunto no ar: \`$SUMMARY\`$(env_link)
+
+---
+
+### Essa resolução NÃO está no seu PR — e não vai para produção.
+
+Ela é **entrada da montagem** de \`$ENV_NAME\`, não código. Sua branch continua
+exatamente como você a deixou, e o merge na \`main\` não passa por aqui: ele é do
+GitHub, contra o seu PR revisado.
+
+O que muda para você:
+
+- **Nada agora.** Sua feature está no ar em \`$ENV_NAME\` e pode ser testada.
+- **Quando $against_txt for mergeado**, o conflito passa a ser contra a \`main\`.
+  Aí sim você rebaseia **uma vez** e resolve de verdade, no seu PR, contra
+  código já revisado. A resolução gravada expira sozinha.
+- **Se qualquer uma das duas branches mexer nessa região**, a resolução deixa de
+  casar e sua branch volta a ficar de fora — com o comentário de exclusão de
+  sempre. A gravação nunca é aplicada a um código que ela não viu.
+
+<sub>🤖 \`rebuild-env\` — comento só em mudança de estado. Enquanto a resolução
+seguir sendo aplicada, silêncio.</sub>
+$(marker resolved)
+BODY_EOF
+)"
+
+    log "#$pr entrou por resolucao gravada -> comenta"
+    post_comment "$pr" "$BODY"
+    if [ "$marked" = true ]; then remove_label "$pr" "$BLOCKED_LABEL"; fi
+    continue
+  fi
+
+  # -------------------------------------------------------------------------
+  # 2b. Entrou limpo.
+  # -------------------------------------------------------------------------
+  if [ "$state" = "back" ]; then
+    log "#$pr ja tinha sido avisado do retorno -> so removendo a marca"
+    if [ "$marked" = true ]; then remove_label "$pr" "$BLOCKED_LABEL"; fi
+    continue
+  fi
+
+  if [ "$before" = true ]; then
+    WHY="não precisa mais da resolução gravada: agora \`$branch\` faz merge limpo
+sozinha. Isso normalmente quer dizer que o PR com que ela conflitava foi
+mergeado na \`main\` — vale rebasear para o seu PR ficar em dia."
+  else
+    WHY="o conflito que a excluía não existe mais."
   fi
 
   BODY="$(cat <<BODY_EOF
 ### ✅ De volta ao ambiente \`$ENV_NAME\`
 
-\`$branch\` voltou ao conjunto publicado em \`$ENV_NAME\` — o conflito que a excluía
-não existe mais.
+\`$branch\` está no conjunto publicado em \`$ENV_NAME\` — $WHY
 
 Conjunto no ar: \`$SUMMARY\`$(env_link)
 
 $PUBLISHED_LIST
 
-<sub>🤖 \`rebuild-env\` — a marca \`$BLOCKED_LABEL\` foi removida.</sub>
+<sub>🤖 \`rebuild-env\`</sub>
 $(marker back)
 BODY_EOF
 )"
 
-  log "#$pr voltou ao conjunto -> comenta + desmarca"
+  log "#$pr entrou limpo (antes: marcado=$marked, resolucao=$before) -> comenta"
   post_comment "$pr" "$BODY"
-  remove_label "$pr" "$BLOCKED_LABEL"
+  if [ "$marked" = true ]; then remove_label "$pr" "$BLOCKED_LABEL"; fi
 done < <(jq -c '.features[]' "$STATE_FILE")
 
 # ---------------------------------------------------------------------------

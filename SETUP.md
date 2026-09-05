@@ -51,9 +51,15 @@ aba Actions depois de uma reconstrução, o token está certo.
 
    | Permissão | Nível | Para quê |
    |---|---|---|
-   | Contents | **Read and write** | push com `--force-with-lease` em `dev` e `hom` |
+   | Contents | **Read and write** | push com `--force-with-lease` em `dev` e `hom`, e a expiração diária em `env-resolutions` |
    | Pull requests | **Read and write** | comentar e aplicar/remover labels |
+   | Actions | **Read and write** | disparar o `rebuild-env` depois de expirar uma resolução (ver 3c) |
    | Metadata | Read-only | obrigatória, o GitHub adiciona sozinho |
+
+   > `Actions: write` só é usada pelo `label-ttl`. Sem ela a expiração continua
+   > funcionando — ela apaga a resolução e o push acontece —, mas os ambientes
+   > seguem com a resolução expirada até o próximo evento qualquer, e o job
+   > emite um `::warning::` dizendo isso. É degradação visível, não silenciosa.
 
 6. **Where can this GitHub App be installed?** → `Only on this account`
 7. **Create GitHub App**
@@ -100,6 +106,13 @@ Cinco labels, duas famílias com papéis bem diferentes:
 ```
 
 O script usa `gh label create --force`, então pode rodar quantas vezes quiser.
+
+**Continuam sendo cinco.** As resoluções gravadas (seção 3c) deliberadamente
+**não** ganharam label: `blocked:<env>` significa *fora do ambiente*, e quem
+entra por uma resolução está **dentro** — marcar seria tornar a label uma
+mentira e quebrar a limpeza de marcas órfãs do `notify.sh`. A memória desse
+estado é o marcador invisível no corpo do comentário, que sempre foi a memória
+de verdade do sistema; a label é o atalho barato para o caso comum.
 
 ---
 
@@ -334,6 +347,67 @@ gh api -X PUT "repos/$OWNER_REPO/rulesets/$RULESET_ID" --input /tmp/ruleset-novo
 
 ---
 
+### 3c. `env-resolutions` — o ref das resoluções gravadas
+
+Este ref só existe se alguém rodar `scripts/publish-resolution.sh`. **Não
+precisa criar nada agora**, e a POC funciona inteira sem ele — o
+`assemble-env.sh` desliga o `rerere` quando não encontra o ref e a montagem fica
+byte a byte a de sempre.
+
+O que ele é: um ref **órfão** (sem relação com a `main`) carregando o `rr-cache`
+do `git rerere` — as resoluções que alguém gravou para pares de PRs que
+conflitam. **Não é código.** Nada dele é buildado, e o único consumidor é a
+montagem.
+
+**Ele não recebe ruleset**, e a decisão é deliberada. As branches `dev` e `hom`
+são protegidas porque escrever nelas à mão desfaz o modelo; aqui é o contrário:
+escrever é o uso normal, feito por pessoas, pelo script. O controle está em
+outro lugar — a resolução só tem efeito se um PR carregar `deploy:*`, e essa
+label continua sendo o limite de confiança do modelo inteiro.
+
+Quem escreve nele:
+
+| Quem | Quando | Como |
+|---|---|---|
+| pessoa | grava uma resolução | `publish-resolution.sh`, com `--force-with-lease` |
+| App | expira resoluções órfãs | `label-ttl.yml`, diário, também com lease |
+| `rebuild-env` | **nunca** | ele só lê — ver abaixo |
+
+**O push nesse ref não dispara workflow, e isso não é configuração faltando.**
+Em evento `push`, o GitHub Actions lê os workflows do **commit da branch que
+recebeu o push** — e este ref é órfão, carrega só `rr-cache/`, sem
+`.github/workflows/`. Não existe workflow ali para ser disparado.
+
+A alternativa seria ramificar o ref da `main` para ele carregar os workflows,
+mas aí ele deixa de ser um ref de dados e vira uma branch de código que ninguém
+sabe interpretar. Ficou o ref burro, e o disparo é explícito: tanto o
+`publish-resolution.sh` quanto o `label-ttl.yml` terminam com um
+`gh workflow run rebuild-env.yml -f environment=ambos`. É por isso que o App
+precisa de `Actions: write` (seção 1).
+
+O "nunca" é uma invariante testada (`test-workflows.sh`), e o motivo é concreto:
+com `rerere` ligado, o próprio job **grava preimages** dos conflitos que *não*
+resolveu. São inofensivos — preimage sem postimage não faz nada —, mas se o job
+empurrasse o cache de volta, o ref viraria lixeira em duas semanas e a pergunta
+"quais resoluções estão vivas?" deixaria de ter resposta.
+
+Para inspecionar o que está gravado hoje:
+
+```bash
+git fetch origin env-resolutions
+git ls-tree -r --name-only FETCH_HEAD | grep meta.json \
+  | xargs -I{} git show FETCH_HEAD:{} | jq -s '.'
+```
+
+Para zerar tudo (o ambiente volta ao conjunto anterior, sem resíduo):
+
+```bash
+git push origin --delete env-resolutions
+gh workflow run rebuild-env.yml -f environment=ambos
+```
+
+---
+
 ## 4. SonarCloud
 
 O gate falha de propósito quando `SONAR_TOKEN` não existe. Um gate de qualidade
@@ -352,6 +426,95 @@ gh secret set SONAR_TOKEN --body "<token>"
 5. Confira em [sonar-project.properties](sonar-project.properties) se
    `sonar.projectKey` e `sonar.organization` batem com o que o SonarCloud mostra
    em **Administration → Update Key**. O padrão é `<org>_<repo>` e `<org>`.
+
+### O quality gate não exige cobertura, e isso é uma decisão
+
+O `Sonar way` — o gate padrão — exige **80% de cobertura em código novo**. Este
+projeto **não gera relatório de cobertura**, por decisão de orçamento de CI
+([sonar-project.properties](sonar-project.properties) explica).
+
+As duas coisas juntas produzem uma armadilha que só aparece tarde. Enquanto os
+PRs mexem em workflows, docs e declarações de tipo, não existe linha executável
+nova, a condição nunca é avaliada, e o gate fica verde **por vácuo**. O primeiro
+PR a adicionar código executável em `src/` toma `ERROR` com `new_coverage = 0%`
+— e o código dele pode estar 100% coberto por teste. O gate estaria medindo a
+ausência de um **relatório**, não a ausência de **teste**.
+
+Aconteceu no PR #16. A saída escolhida foi **não exigir a métrica**, e a razão é
+o escopo desta POC: ela existe para demonstrar um modelo de branching, e o papel
+do Sonar aqui é provar que **existe um portão de qualidade travando o merge** —
+não replicar fielmente a política de qualidade de um projeto real. Um projeto de
+verdade faria o contrário: geraria o relatório.
+
+O que **continua** reprovando, e é por isso que o gate não virou adesivo:
+
+| Condição | Reprova quando |
+|---|---|
+| `new_reliability_rating` > 1 | bug novo |
+| `new_security_rating` > 1 | vulnerabilidade nova |
+| `new_maintainability_rating` > 1 | code smell novo |
+| `new_duplicated_lines_density` > 3 | duplicação nova |
+| `new_security_hotspots_reviewed` < 100 | hotspot não revisado |
+
+**O `Sonar way` é built-in e não pode ser editado**, então o caminho é copiar,
+remover uma condição e associar a cópia ao projeto.
+
+Pela UI: **Quality Gates → Sonar way → Copy** → nomeie `POC sem coverage` →
+remova a condição `Coverage on New Code` → **Projects → Add** este projeto.
+
+Pela API, com um token de administração da organização (o `SONAR_TOKEN` que está
+no `gh secret` serve para o scan, mas confira se ele tem permissão de admin):
+
+```bash
+SONAR_TOKEN=<seu token>
+ORG=mathewsjts
+KEY=mathewsjts_derivative-environments
+GATE="POC sem coverage"
+
+sonar() { curl -s -u "$SONAR_TOKEN:" "$@"; }
+
+# 1. Copia o built-in.
+sonar -X POST "https://sonarcloud.io/api/qualitygates/copy" \
+  --data-urlencode "sourceName=Sonar way" \
+  --data-urlencode "name=$GATE" \
+  --data-urlencode "organization=$ORG"
+
+# 2. Remove SO a condicao de cobertura.
+ID=$(sonar "https://sonarcloud.io/api/qualitygates/show?organization=$ORG&name=$GATE" \
+     | jq -r '.conditions[] | select(.metric == "new_coverage") | .id')
+sonar -X POST "https://sonarcloud.io/api/qualitygates/delete_condition" \
+  --data-urlencode "id=$ID" --data-urlencode "organization=$ORG"
+
+# 3. Associa ao projeto.
+sonar -X POST "https://sonarcloud.io/api/qualitygates/select" \
+  --data-urlencode "gateName=$GATE" \
+  --data-urlencode "projectKey=$KEY" \
+  --data-urlencode "organization=$ORG"
+
+# 4. Confere o que sobrou em pe.
+sonar "https://sonarcloud.io/api/qualitygates/show?organization=$ORG&name=$GATE" \
+  | jq -r '.conditions[] | "  \(.metric) \(.op) \(.error)"'
+```
+
+> Os comandos acima não foram executados na configuração deste repositório —
+> o `SONAR_TOKEN` é secret do GitHub e não pode ser lido de volta. Se algum
+> parâmetro tiver mudado na API do SonarCloud, o caminho pela UI resolve igual.
+
+Depois, para o PR aberto reavaliar com o gate novo — um analysis novo é o que
+atualiza o check:
+
+```bash
+gh run rerun "$(gh run list --branch <branch> --workflow pr-gates --limit 1 \
+  --json databaseId --jq '.[0].databaseId')"
+```
+
+> **Não confunda os dois checks com nome parecido.** `SonarCloud` é o *job* do
+> `pr-gates.yml` e está na lista de contextos exigidos pelo ruleset
+> (seção 3b). `SonarCloud Code Analysis` é o check do app do SonarCloud, que
+> reporta o quality gate e **não** é exigido — foi por isso que o PR #16
+> continuou mergeável com ele vermelho. Se você quiser que o gate de qualidade
+> realmente trave o merge, adicione `SonarCloud Code Analysis` aos contextos
+> exigidos do ruleset.
 
 ---
 
@@ -451,7 +614,14 @@ gh variable set ENABLE_FAKE_DEPLOY --body false    # depois
 gh secret list        # APP_ID, APP_PRIVATE_KEY, SONAR_TOKEN
 gh variable list      # VERCEL_URL_DEV, VERCEL_URL_HOM, ENABLE_FAKE_DEPLOY=true
 gh label list         # deploy:dev, deploy:hom, priority:high, blocked:dev, blocked:hom
-gh ruleset list       # 2 rulesets ativos
+gh ruleset list       # 2 rulesets ativos (env-resolutions NAO tem, ver 3c)
+
+# O gate do Sonar nao pode exigir cobertura (ver 4). Esperado: sem new_coverage.
+curl -s "https://sonarcloud.io/api/qualitygates/project_status?projectKey=mathewsjts_derivative-environments" \
+  | jq -r '.projectStatus.conditions[].metricKey'
+
+# Opcional: se nao existir, tudo funciona igual e o rerere fica desligado.
+git ls-remote origin refs/heads/env-resolutions
 
 ./.github/scripts/test-assemble.sh   # a montagem, offline, ~5s
 ./.github/scripts/test-workflows.sh  # invariantes de concorrência dos workflows

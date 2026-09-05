@@ -121,6 +121,65 @@ check "o filtro de blocked:* continua vindo antes de tudo" \
   "$(job_block guard | grep -c 'blocked:\*)' || true)" "1"
 
 # ---------------------------------------------------------------------------
+# Resolucoes gravadas (git rerere). Duas invariantes, e as duas ja seriam bugs
+# silenciosos -- a familia de erro que este arquivo existe para pegar.
+#
+#   1. Gravar ou expirar uma resolucao muda QUEM entra no conjunto sem que
+#      nenhuma branch ou label mude -- e o push no ref NAO dispara nada, porque
+#      em evento `push` o Actions le os workflows da branch que recebeu o push e
+#      aquele ref e orfao, so com rr-cache/. Sem o `gh workflow run` explicito
+#      nos dois escritores, a pessoa grava a resolucao, nada acontece, e o
+#      ambiente so muda no proximo evento qualquer -- sem erro em lugar nenhum.
+#
+#   2. O ref e SOMENTE LEITURA para o job. Com rerere ligado, o proprio job
+#      grava preimages dos conflitos que NAO resolveu; se ele empurrasse o cache
+#      de volta, o ref viraria lixeira e a pergunta "quais resolucoes estao
+#      vivas?" deixaria de ter resposta. Quem escreve e o publish-resolution.sh
+#      (humano) e a expiracao do label-ttl.
+# ---------------------------------------------------------------------------
+echo
+echo "== resolucoes gravadas =="
+
+check "o nome do ref e definido uma vez so, no env do workflow" \
+  "$(grep -c '^  RESOLUTIONS_REF: env-resolutions$' "$WF")" "1"
+
+# O ramo do guard fica (a decisao esta certa se a forma do ref mudar), mas quem
+# de fato dispara sao os dois escritores do ref. Testar so o guard daria falsa
+# seguranca -- foi exatamente o erro que este bloco existe para nao repetir.
+check "o guard reconhece push no ref de resolucoes" \
+  "$(job_block guard | grep -c 'REF_NAME" = "\$RESOLUTIONS_REF"' || true)" "1"
+
+check "e o guard diz que esse ramo nao e alcancado hoje" \
+  "$(job_block guard | grep -c 'NA PRATICA ESTE RAMO NAO E ALCANCADO HOJE' || true)" "1"
+
+check "publish-resolution.sh dispara a reconstrucao explicitamente" \
+  "$(grep -cE '^if gh workflow run rebuild-env\.yml' scripts/publish-resolution.sh)" "1"
+
+check "e a expiracao do label-ttl tambem" \
+  "$(grep -c 'gh workflow run rebuild-env.yml' .github/workflows/label-ttl.yml)" "1"
+
+check "e o passo de montagem recebe o mesmo nome de ref" \
+  "$(step_block "Montar o conjunto de \${{ matrix.env }}" | grep -c 'RESOLUTIONS_REF: \${{ env\.RESOLUTIONS_REF }}' || true)" "1"
+
+check "o rebuild-env NUNCA faz push no ref de resolucoes" \
+  "$(grep -cE 'git push[^|&;]*(env-resolutions|RESOLUTIONS_REF)' "$WF" || true)" "0"
+
+check "o assemble apaga o cache local antes de carregar o do ref" \
+  "$(grep -c 'rm -rf "\$RR_CACHE"' .github/scripts/assemble-env.sh)" "1"
+
+check "e desliga o rerere explicitamente quando nao ha resolucao" \
+  "$(grep -c 'git config rerere.enabled false' .github/scripts/assemble-env.sh)" "1"
+
+# As sondas de atribuicao de culpa nao podem enxergar resolucao: elas perguntam
+# "estas duas branches se contradizem no texto?". Com rerere ligado nelas, o
+# comentario passaria a culpar a main por um conflito entre duas features.
+check "as sondas rodam com rerere desligado" \
+  "$(grep -c 'git -c rerere.enabled=false merge' .github/scripts/assemble-env.sh)" "3"
+
+check "a expiracao das resolucoes usa lease, como todo push deste repo" \
+  "$(grep -c 'force-with-lease="refs/heads/\${RESOLUTIONS_REF}' .github/workflows/label-ttl.yml)" "1"
+
+# ---------------------------------------------------------------------------
 # pr-gates: a main passou a ter CI, e com ela um evento onde
 # `github.event.pull_request.number` e VAZIO.
 #

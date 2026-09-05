@@ -9,7 +9,8 @@
 #   ENV_NAME=hom MAX_SET=5 ./.github/scripts/assemble-env.sh
 #
 # Contrato:
-#   entrada  : ENV_NAME, MAX_SET, STATE_FILE (opcional), gh autenticado
+#   entrada  : ENV_NAME, MAX_SET, STATE_FILE (opcional), RESOLUTIONS_REF
+#              (opcional), gh autenticado
 #   saida    : branch local <ENV_NAME> montada + STATE_FILE em JSON
 #   exit 0   : montou (com ou sem branches excluidas por conflito)
 #   exit 2   : teto do conjunto estourado -- nao montou nada
@@ -46,6 +47,67 @@ section "[$ENV_NAME] base"
 git fetch --quiet origin main
 BASE_SHA="$(git rev-parse origin/main)"
 log "origin/main = $BASE_SHA"
+
+# ---------------------------------------------------------------------------
+# 1b. Resolucoes gravadas (opcional).
+#
+#     Duas branches que conflitam nao podem coexistir num ambiente -- a menos
+#     que alguem escreva a terceira versao do codigo. A pergunta nao e SE ela
+#     existe, e onde ela mora:
+#
+#       numa branch de integracao -> vira branch de longa duracao com commits
+#                                    que nao existem em outro lugar, que e
+#                                    exatamente o que este modelo eliminou;
+#       numa das features         -> a branch passa a carregar codigo de uma
+#                                    feature que talvez nunca seja mergeada;
+#       AQUI                      -> a resolucao vira ENTRADA da derivacao.
+#
+#     E o rr-cache do git rerere, versionado num ref orfao. Um humano resolve
+#     uma vez (scripts/record-resolution.sh) e a maquina reaplica em toda
+#     reconstrucao. As branches de feature nao sao tocadas.
+#
+#     Ref orfao, e NAO actions/cache: cache e evictavel. Se ele sumisse, o
+#     ambiente mudaria de conteudo sem NENHUMA entrada ter mudado -- quebra
+#     silenciosa do "mesma entrada, mesma saida". Como ref, o SHA e uma entrada
+#     explicita, e entra no manifesto.
+#
+#     Sem nenhuma resolucao gravada o rerere fica DESLIGADO e a montagem e
+#     byte a byte a de sempre. Quem nao usa nao paga nada.
+# ---------------------------------------------------------------------------
+RESOLUTIONS_REF="${RESOLUTIONS_REF:-env-resolutions}"
+# Absoluto de proposito: --git-path devolve caminho RELATIVO, e o
+# publish-resolution.sh faz cd para um tmpdir depois de calcular isto.
+RR_CACHE="$(git rev-parse --absolute-git-dir)/rr-cache"
+RESOLUTIONS_SHA=""
+RESOLUTIONS_COUNT=0
+
+# O cache do runner nunca sobrevive de uma execucao para outra, e nao pode
+# mesmo: com rerere ligado o proprio job GRAVA preimages dos conflitos que NAO
+# resolveu. Sao lixo (preimage sem postimage nao faz nada), mas se alguem
+# "otimizar" isso com um push de volta, o ref vira lixeira. Aqui o ref e
+# somente leitura -- quem escreve nele e scripts/publish-resolution.sh.
+rm -rf "$RR_CACHE"
+
+if git fetch --quiet origin \
+     "+refs/heads/$RESOLUTIONS_REF:refs/remotes/origin/$RESOLUTIONS_REF" 2>/dev/null; then
+  RESOLUTIONS_SHA="$(git rev-parse "origin/$RESOLUTIONS_REF")"
+  mkdir -p "$RR_CACHE"
+  git archive "origin/$RESOLUTIONS_REF" rr-cache 2>/dev/null \
+    | tar -x -C "$(git rev-parse --absolute-git-dir)" 2>/dev/null || true
+  RESOLUTIONS_COUNT="$(find "$RR_CACHE" -name postimage 2>/dev/null | wc -l | tr -d ' ')"
+fi
+
+if [ "$RESOLUTIONS_COUNT" -gt 0 ]; then
+  git config rerere.enabled true
+  git config rerere.autoUpdate true
+  log "resolucoes: $RESOLUTIONS_COUNT de $RESOLUTIONS_REF @ $(git rev-parse --short "$RESOLUTIONS_SHA")"
+else
+  # Explicito, e nao "por omissao": um rerere.enabled herdado do ambiente do
+  # runner mudaria a montagem sem aparecer em lugar nenhum.
+  git config rerere.enabled false
+  RESOLUTIONS_SHA=""
+  log "resolucoes: nenhuma -- montagem identica a de sempre"
+fi
 
 # ---------------------------------------------------------------------------
 # 2. Conjunto candidato: PRs abertos para a main com a label do ambiente.
@@ -135,6 +197,115 @@ if [ "$CANDIDATE_COUNT" -gt 0 ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# blame_conflict <sha> -- contra QUEM, exatamente?
+#
+# "Tocou o mesmo arquivo" nao serve como resposta: numa POC onde tres branches
+# editam o mesmo registry, isso aponta o culpado errado toda vez que a terceira
+# mexe noutra regiao. E o comentario no PR precisa acertar -- ele diz para a
+# pessoa esperar o merge de um PR especifico.
+#
+# Entao reproduzimos o conflito em pares, que e barato (merge e instantaneo) e
+# exato:
+#   1. main + X conflita?      -> a branch esta atras da main
+#   2. main + F + X conflita?  -> o primeiro F que conflitar e a resposta
+#
+# As sondas rodam com rerere DESLIGADO, e isso nao e detalhe. Elas perguntam
+# "estas duas branches se contradizem no texto?", e uma resolucao gravada nao
+# muda essa resposta -- so mudaria QUEM leva a culpa. Com rerere ligado, uma
+# sonda `main + F` poderia mergear limpo por causa de uma gravacao que nao cobre
+# o conjunto inteiro, F escaparia da atribuicao e o comentario diria "sua branch
+# esta atrasada em relacao a main", que e falso.
+#
+# Chamada nos DOIS caminhos: para quem ficou de fora (o comentario de exclusao)
+# e para quem entrou por resolucao (o comentario precisa nomear o par tambem --
+# "voce esta em hom por uma resolucao contra #N" so e acionavel com o N).
+#
+# Escreve BLAME_PR (numero ou 'null') e BLAME_FILES (vazio quando so a main
+# explica o conflito -- ai o caller mantem os arquivos que ja tinha).
+# ---------------------------------------------------------------------------
+blame_conflict() {
+  local sha="$1" inc inc_pr inc_sha
+  BLAME_PR='null'; BLAME_FILES=""
+
+  git checkout --quiet -B __probe "$BASE_SHA"
+  if git -c rerere.enabled=false merge --no-ff --no-edit -m probe "$sha" >/dev/null 2>&1; then
+    while read -r inc; do
+      [ -n "$inc" ] || continue
+      inc_pr="$(jq -r '.pr' <<<"$inc")"
+      inc_sha="$(jq -r '.sha' <<<"$inc")"
+
+      git checkout --quiet -B __probe "$BASE_SHA"
+      if ! git -c rerere.enabled=false merge --no-ff --no-edit -m probe-base "$inc_sha" >/dev/null 2>&1; then
+        git merge --abort >/dev/null 2>&1 || true
+        continue
+      fi
+      if ! git -c rerere.enabled=false merge --no-ff --no-edit -m probe "$sha" >/dev/null 2>&1; then
+        BLAME_PR="$inc_pr"
+        BLAME_FILES="$(git diff --name-only --diff-filter=U || true)"
+        git merge --abort >/dev/null 2>&1 || true
+        break
+      fi
+    done < <(jq -c '.[]' <<<"$INCLUDED")
+  else
+    # Conflita sozinha em cima da main: nao e briga com outra feature, a branch
+    # e que esta desatualizada.
+    BLAME_FILES="$(git diff --name-only --diff-filter=U || true)"
+    git merge --abort >/dev/null 2>&1 || true
+  fi
+
+  git checkout --quiet "$ENV_NAME"
+  git branch -D __probe >/dev/null 2>&1 || true
+}
+
+# ---------------------------------------------------------------------------
+# merge_feature <sha> <mensagem>
+#
+# Existe por UM motivo, e ele e a armadilha central de usar rerere aqui:
+#
+#   COM UMA RESOLUCAO GRAVADA, `git merge` AINDA SAI COM CODIGO 1.
+#
+# Ele aplica a resolucao, deixa a arvore inteira resolvida e staged, e para
+# esperando o `git commit` -- imprimindo "Staged '<arquivo>' using previous
+# resolution.". Quem olhar so o codigo de saida -- que e o que este script fazia
+# -- exclui do ambiente uma branch que na verdade entrou, e o rerere nao serve
+# para nada.
+#
+# O sinal certo e o INDICE: nenhum caminho em estado U.
+#
+# Escreve:
+#   MERGE_RESULT    clean | resolved | conflict
+#   MERGE_RR_FILES  arquivos resolvidos pela gravacao (so em resolved)
+#   MERGE_FILES     arquivos em conflito (so em conflict; o merge ja foi abortado)
+# ---------------------------------------------------------------------------
+merge_feature() {
+  local sha="$1" msg="$2" out
+  MERGE_RESULT=""; MERGE_RR_FILES=""; MERGE_FILES=""
+
+  if out="$(git merge --no-ff --no-edit -m "$msg" "$sha" 2>&1)"; then
+    MERGE_RESULT=clean
+    return 0
+  fi
+
+  # MERGE_HEAD confirma que existe um merge em curso. Sem esta guarda, uma falha
+  # de outra natureza ("not something we can merge", ref invalido) tambem daria
+  # indice limpo, e commitariamos um merge que nunca comecou.
+  if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1 \
+     && [ -z "$(git diff --name-only --diff-filter=U)" ]; then
+    MERGE_RR_FILES="$(sed -n "s/^Staged '\(.*\)' using previous resolution\.$/\1/p" <<<"$out")"
+    git commit --quiet --no-edit
+    MERGE_RESULT=resolved
+    return 0
+  fi
+
+  # Resolucao PARCIAL cai aqui de proposito: se sobrou um caminho em U, a
+  # gravacao nao cobre este merge e a branch fica de fora, como sempre.
+  MERGE_FILES="$(git diff --name-only --diff-filter=U || true)"
+  git merge --abort >/dev/null 2>&1 || git reset --hard --quiet HEAD
+  MERGE_RESULT=conflict
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # 4. PASSE 1 -- descoberta.
 #    Tenta cada merge para saber QUEM entra. Em conflito: registra os arquivos,
 #    aborta o merge e segue para a proxima. O loop nao para -- e essa a diferenca
@@ -164,59 +335,36 @@ while read -r row; do
   prio="$(jq -r '.priority' <<<"$row")"
   if [ "$prio" -gt 0 ]; then mark=" [priority:high]"; else mark=""; fi
 
-  if git merge --no-ff --no-edit -m "merge(env): #$pr $branch" "$sha" >/dev/null 2>&1; then
-    log "OK      #$pr $branch$mark"
-    INCLUDED="$(jq -c --argjson pr "$pr" --arg b "$branch" --arg s "$sha" --arg a "$author" \
-      --argjson prio "$prio" \
-      '. + [{pr:$pr, branch:$b, sha:$s, author:$a}
-            + (if $prio > 0 then {priority:$prio} else {} end)]' <<<"$INCLUDED")"
-  else
-    files="$(git diff --name-only --diff-filter=U || true)"
-    git merge --abort || git reset --hard --quiet HEAD
-
-    # Contra QUEM, exatamente?
-    #
-    # "Tocou o mesmo arquivo" nao serve como resposta: numa POC onde tres
-    # branches editam o mesmo registry, isso aponta o culpado errado toda vez
-    # que a terceira mexe noutra regiao. E o comentario no PR precisa acertar --
-    # ele diz para a pessoa esperar o merge de um PR especifico.
-    #
-    # Entao reproduzimos o conflito em pares, que e barato (merge e instantaneo)
-    # e exato:
-    #   1. main + X conflita?           -> a branch esta atras da main
-    #   2. main + F + X conflita?       -> o primeiro F que conflitar e a resposta
-    against='null'
-    probe_files="$files"
-
-    git checkout --quiet -B __probe "$BASE_SHA"
-    if git merge --no-ff --no-edit -m probe "$sha" >/dev/null 2>&1; then
-      while read -r inc; do
-        [ -n "$inc" ] || continue
-        inc_pr="$(jq -r '.pr' <<<"$inc")"
-        inc_sha="$(jq -r '.sha' <<<"$inc")"
-
-        git checkout --quiet -B __probe "$BASE_SHA"
-        if ! git merge --no-ff --no-edit -m probe-base "$inc_sha" >/dev/null 2>&1; then
-          git merge --abort >/dev/null 2>&1 || true
-          continue
-        fi
-        if ! git merge --no-ff --no-edit -m probe "$sha" >/dev/null 2>&1; then
-          against="$inc_pr"
-          probe_files="$(git diff --name-only --diff-filter=U || true)"
-          git merge --abort >/dev/null 2>&1 || true
-          break
-        fi
-      done < <(jq -c '.[]' <<<"$INCLUDED")
+  if merge_feature "$sha" "merge(env): #$pr $branch"; then
+    # resolvedBy e OMITIDO quando vazio, pelo mesmo motivo de `priority`: um
+    # conjunto sem resolucao nenhuma precisa produzir um descritor byte a byte
+    # igual ao ja publicado, senao o primeiro rebuild depois desta feature
+    # republica todo ambiente sem nada ter mudado.
+    rr='[]'
+    rr_against='null'
+    if [ "$MERGE_RESULT" = resolved ]; then
+      rr="$(jq -c -R -s 'split("\n") | map(select(length > 0))' <<<"$MERGE_RR_FILES")"
+      # Quem entrou por resolucao ainda conflita -- so nao ficou de fora. O
+      # comentario no PR precisa do par para ser acionavel ("quando #N mergear,
+      # voce rebaseia uma vez"), entao a mesma sonda de sempre roda aqui.
+      blame_conflict "$sha"
+      rr_against="$BLAME_PR"
+      log "OK*     #$pr $branch$mark (resolucao gravada vs ${rr_against}: $(tr '\n' ' ' <<<"$MERGE_RR_FILES"))"
     else
-      # Conflita sozinha em cima da main: nao e briga com outra feature, a
-      # branch e que esta desatualizada.
-      probe_files="$(git diff --name-only --diff-filter=U || true)"
-      git merge --abort >/dev/null 2>&1 || true
+      log "OK      #$pr $branch$mark"
     fi
+    INCLUDED="$(jq -c --argjson pr "$pr" --arg b "$branch" --arg s "$sha" --arg a "$author" \
+      --argjson prio "$prio" --argjson rr "$rr" --argjson against "$rr_against" \
+      '. + [{pr:$pr, branch:$b, sha:$s, author:$a}
+            + (if $prio > 0 then {priority:$prio} else {} end)
+            + (if ($rr | length) > 0
+               then {resolvedBy:$rr, conflictsWith:$against} else {} end)]' <<<"$INCLUDED")"
+  else
+    files="$MERGE_FILES"
 
-    git checkout --quiet "$ENV_NAME"
-    git branch -D __probe >/dev/null 2>&1 || true
-    files="$probe_files"
+    blame_conflict "$sha"
+    against="$BLAME_PR"
+    files="${BLAME_FILES:-$files}"
 
     log "CONFLITO #$pr $branch$mark (vs ${against}) -> $(tr '\n' ' ' <<<"$files")"
     EXCLUDED="$(jq -c --argjson pr "$pr" --arg b "$branch" --arg s "$sha" --arg a "$author" \
@@ -256,8 +404,15 @@ while read -r inc; do
   pr="$(jq -r '.pr' <<<"$inc")"
   branch="$(jq -r '.branch' <<<"$inc")"
   sha="$(jq -r '.sha' <<<"$inc")"
-  # Nao pode conflitar: o passe 1 ja provou que esse subconjunto, nessa ordem, merge limpo.
-  git merge --no-ff --no-edit -m "merge(env): #$pr $branch" "$sha" >/dev/null
+  # Nao pode conflitar: o passe 1 ja provou que esse subconjunto, nessa ordem,
+  # merge limpo -- eventualmente com a ajuda de uma resolucao gravada, que e a
+  # MESMA nos dois passes (o cache nao muda no meio da execucao). Por isso o
+  # passe 2 tambem precisa do merge_feature: sem ele, um merge resolvido pelo
+  # rerere derrubaria o job aqui, com o indice limpo e exit 1.
+  merge_feature "$sha" "merge(env): #$pr $branch" || {
+    echo "ERRO: #$pr $branch conflitou no passe 2, que o passe 1 provou impossivel." >&2
+    exit 1
+  }
 done < <(jq -c '.[]' <<<"$INCLUDED")
 
 # ---------------------------------------------------------------------------
@@ -288,11 +443,46 @@ if [ -n "$REMOTE_HEAD" ]; then
   PUBLISHED="$(git show "origin/$ENV_NAME:build-manifest.json" 2>/dev/null || echo '{}')"
 fi
 
-descriptor() { jq -S -c '{environment, base, features, excluded}' 2>/dev/null || echo 'null'; }
+# Quem no conjunto ja dependia de resolucao na publicacao ANTERIOR. E a memoria
+# que o notify.sh usa para saber que "entrou por resolucao" virou "entra limpo"
+# -- transicao que merece um comentario e que nenhuma label registra. Sai de
+# graca: o manifesto publicado ja foi lido acima.
+RESOLVED_BEFORE="$(jq -c '[.features[]? | select(has("resolvedBy")) | .pr]' <<<"$PUBLISHED" 2>/dev/null || echo '[]')"
+
+# ---------------------------------------------------------------------------
+# `resolutions` entra no descritor SO quando alguma feature de fato dependeu de
+# uma resolucao. Os dois lados dessa condicao sao necessarios:
+#
+#   presente quando ha dependencia -- senao regravar a resolucao do MESMO par
+#     (outro postimage, mesmo id de conflito) produziria conjunto igual, o teste
+#     de "nada mudou" daria no-op e o ambiente seguiria servindo a resolucao
+#     velha. E a mesma familia de bug do previousEnvHead: a branch parada, sem
+#     erro em lugar nenhum.
+#
+#   ausente quando nao ha -- senao gravar uma resolucao para um par que nao esta
+#     em hom mudaria o SHA do ref e republicaria dev e hom a toa.
+#
+# O preco aceito e o meio-termo: gravar qualquer resolucao republica os
+# ambientes que ja usam alguma. Raro (gravar e ato humano e deliberado) e
+# seguro na direcao certa.
+# ---------------------------------------------------------------------------
+RESOLUTIONS_JSON='null'
+if [ -n "$RESOLUTIONS_SHA" ] && jq -e 'any(.[]; has("resolvedBy"))' <<<"$INCLUDED" >/dev/null; then
+  RESOLUTIONS_JSON="$(jq -c -n --arg ref "$RESOLUTIONS_REF" --arg sha "$RESOLUTIONS_SHA" \
+    '{ref:$ref, sha:$sha}')"
+fi
+
+descriptor() {
+  jq -S -c '{environment, base, features, excluded}
+            + (if (.resolutions // null) != null then {resolutions:.resolutions} else {} end)' \
+    2>/dev/null || echo 'null'
+}
 
 NEW_DESC="$(jq -S -c -n --arg env "$ENV_NAME" --arg base "$BASE_SHA" \
               --argjson features "$INCLUDED" --argjson excluded "$EXCLUDED" \
-  '{environment:$env, base:{branch:"main", sha:$base}, features:$features, excluded:$excluded}')"
+              --argjson resolutions "$RESOLUTIONS_JSON" \
+  '{environment:$env, base:{branch:"main", sha:$base}, features:$features, excluded:$excluded}
+   + (if $resolutions != null then {resolutions:$resolutions} else {} end)')"
 PUB_DESC="$(printf '%s' "$PUBLISHED" | descriptor)"
 
 NOOP=false
@@ -318,9 +508,11 @@ else
   # ---------------------------------------------------------------------------
   jq -S -n --arg env "$ENV_NAME" --arg base "$BASE_SHA" --arg prev "$REMOTE_HEAD" \
         --argjson features "$INCLUDED" --argjson excluded "$EXCLUDED" \
+        --argjson resolutions "$RESOLUTIONS_JSON" \
     '{environment:$env, base:{branch:"main", sha:$base},
       previousEnvHead:(if $prev == "" then null else $prev end),
-      features:$features, excluded:$excluded}' \
+      features:$features, excluded:$excluded}
+     + (if $resolutions != null then {resolutions:$resolutions} else {} end)' \
     > build-manifest.json
 
   git add build-manifest.json
@@ -336,9 +528,12 @@ jq -n --arg env "$ENV_NAME" --arg base "$BASE_SHA" --arg head "$ENV_HEAD" \
       --arg remote "$REMOTE_HEAD" --argjson noop "$NOOP" \
       --argjson features "$INCLUDED" --argjson excluded "$EXCLUDED" \
       --argjson candidates "$CANDIDATES" \
+      --argjson resolutions "$RESOLUTIONS_JSON" --argjson resolvedBefore "$RESOLVED_BEFORE" \
   '{environment:$env, base:{branch:"main", sha:$base}, envHead:$head,
     remoteHead:(if $remote == "" then null else $remote end), noop:$noop,
-    capExceeded:false, features:$features, excluded:$excluded, candidates:$candidates}' \
+    capExceeded:false, features:$features, excluded:$excluded, candidates:$candidates,
+    resolutions:$resolutions, resolvedBefore:$resolvedBefore}' \
   > "$STATE_FILE"
 
-section "[$ENV_NAME] pronto: $(jq -r '.features | length' "$STATE_FILE") dentro, $(jq -r '.excluded | length' "$STATE_FILE") fora"
+RESOLVED_NOW="$(jq -r '[.features[] | select(has("resolvedBy"))] | length' "$STATE_FILE")"
+section "[$ENV_NAME] pronto: $(jq -r '.features | length' "$STATE_FILE") dentro, $(jq -r '.excluded | length' "$STATE_FILE") fora$([ "$RESOLVED_NOW" -gt 0 ] && echo " ($RESOLVED_NOW por resolucao gravada)")"

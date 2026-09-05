@@ -28,10 +28,19 @@
 > existir — não há o que mostrar na Vercel.
 
 ```bash
-./.github/scripts/test-assemble.sh    # 29 verificações offline, ~5s
+gh variable set ENABLE_FAKE_DEPLOY --body true   # ⚠️ o bloco 2 depende disto
+./.github/scripts/test-assemble.sh    # a montagem, offline, ~5s
+./.github/scripts/test-workflows.sh   # invariantes de concorrência
 ./scripts/seed-demo.sh                # 3 PRs + primeira reconstrução
 gh run list --limit 5                 # rebuild-env e fake-deploy verdes
 ```
+
+> **`ENABLE_FAKE_DEPLOY` não é detalhe de configuração.** O `fake-deploy` fica
+> desligado por padrão porque custa 36 minutos faturados para 3 de computação
+> (SETUP.md §6). Desligado, o job aparece como *skipped* e o bloco 2 — o item
+> que prova que o push do App dispara workflows — fica sem o que apontar na
+> tela. Ligue agora, confirme com `gh variable list`, e desligue depois da
+> apresentação.
 
 Deixe a branch do bloco 6 **empurrada, mas sem PR** — assim ela não aparece como
 um quarto PR no bloco 1, e abrir o PR ao vivo custa um comando:
@@ -114,7 +123,8 @@ gh pr edit 3 --add-label deploy:hom
 feat/c-metrics-endpoint`.
 
 **Mostrar — este é o item que prova o token:** o workflow **`fake-deploy`**
-rodou logo depois.
+rodou logo depois. (Se ele aparecer *skipped*, `ENABLE_FAKE_DEPLOY` não está
+`true` — volte ao bloco 0.)
 
 > Repare que existe um segundo job aqui. Ele rodou porque o push em `hom` foi
 > feito por um **GitHub App**. Se eu tivesse usado o `GITHUB_TOKEN` padrão do
@@ -280,7 +290,7 @@ gh pr create --base main --head feat/d-lint-error \
   --body "PR de demonstração: o gate reprova antes da main."
 ```
 
-**Mostrar:** o job `typecheck / lint / testes` vermelho, e a `main` bloqueada.
+**Mostrar:** o job `gates do PR` vermelho no passo `lint`, e a `main` bloqueada.
 
 > Isso aqui não é novidade — é CI. A novidade é **onde** ele roda. Existe um só
 > PR por feature, e ele aponta para a `main`. Então os gates rodam uma vez, no

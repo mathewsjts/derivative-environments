@@ -21,6 +21,25 @@
 # Num repo de verdade, aqui e onde o deploy de fato aconteceria. Nesta POC quem
 # deploya e a Vercel, pela integracao Git nativa -- que tem exatamente a mesma
 # dependencia: ela reage ao push na branch.
+#
+# POR QUE ELE FICA DESLIGADO POR PADRAO
+#
+# Ele roda a cada push em dev e hom, e um push em dev e hom e o desfecho normal
+# de quase todo evento do modelo. Sao 36 jobs de ~5s cada -- 36 minutos
+# faturados para 3 minutos de computacao, porque o GitHub arredonda por job.
+#
+# O valor dele e inteiramente de APRESENTACAO: provar, ao vivo, que o push do
+# App dispara workflows. Fora da demo ele nao verifica nada que ja nao esteja
+# verificado.
+#
+# Entao ele so roda quando a variavel de repositorio ENABLE_FAKE_DEPLOY estiver
+# em 'true'. Job pulado nao consome minuto.
+#
+#   gh variable set ENABLE_FAKE_DEPLOY --body true    # antes da demo
+#   gh variable set ENABLE_FAKE_DEPLOY --body false   # depois
+#
+# ⚠️  O bloco 2 do DEMO.md depende de mostrar este job tendo rodado. Ligar a
+#     variavel faz parte da preparacao (DEMO.md, bloco 0; SETUP.md, secao 6).
 # ---------------------------------------------------------------------------
 name: fake-deploy
 
@@ -34,6 +53,9 @@ permissions:
 jobs:
   deploy:
     name: deploy simulado de ${{ github.ref_name }}
+    # Desligado por padrao: variavel ausente ou com qualquer outro valor pula o
+    # job, e job pulado nao e faturado. Ver o cabecalho.
+    if: vars.ENABLE_FAKE_DEPLOY == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

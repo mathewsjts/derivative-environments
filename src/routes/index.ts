@@ -30,6 +30,7 @@ import { versionRouter } from './version';
 // arquivo. "Todo mundo mexe no mesmo arquivo" nao trava o ambiente.
 // ===========================================================================
 // observability-imports:start
+import { metricsRouter } from './metrics';
 // observability-imports:end
 
 export function registerRoutes(app: Express): void {
@@ -45,5 +46,6 @@ export function registerRoutes(app: Express): void {
   // -------------------------------------------------------------------------
 
   // observability-routes:start
+  app.use('/metrics', metricsRouter);
   // observability-routes:end
 }

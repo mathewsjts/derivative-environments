@@ -35,6 +35,33 @@
 # que nao existe mais. Por isso o nome aqui e `gates do PR`, e nao a lista dos
 # passos que ele roda: acrescentar ou tirar um gate la dentro nao pode exigir
 # uma migracao de ruleset. Ver SETUP.md, secao 3b.
+#
+# POR QUE ELE TAMBEM RODA EM PUSH NA MAIN
+#
+# Ate aqui NAO EXISTIA CI NA MAIN. O gatilho era so `pull_request`, e a main e
+# producao: nenhum `npm test`, nenhum lint, nenhum `tsc` depois do merge. O
+# unico sinal pos-merge era o `docker build` do rebuild-env, e ele so COMPILA --
+# o Dockerfile instala typescript e mais nada, sem vitest e sem eslint, de
+# proposito (ver o estagio 2 la). Um conflito semantico entre dois PRs que
+# passaram verdes separados, quebra um teste e ainda assim compila, ia para
+# producao sem ninguem saber.
+#
+# Isso e a outra metade da decisao do `strict` (SETUP.md, secao 3b). A main nao
+# precisa que todo PR aberto esteja atualizado com ela; precisa saber em ~60
+# segundos quando alguma coisa quebrou. E prevencao O(N x PRs abertos) trocada
+# por deteccao O(1): dois jobs por merge, sempre os mesmos dois, nao importa
+# quantos PRs estejam abertos.
+#
+# ⚠️  EM EVENTO DE PUSH NAO EXISTE `github.event.pull_request`.
+#
+# Tres coisas aqui dependiam do numero do PR e passaram a tratar o push
+# explicitamente. Cada uma esta comentada onde aparece:
+#
+#   1. o grupo de concorrencia, logo abaixo;
+#   2. a tag da imagem no `docker build (gate)`;
+#   3. o passo `sincronia com a main`, que busca refs/pull/N/head -- em push
+#      isso viraria `refs/pull//head` e falharia, e a pergunta que ele faz nao
+#      tem sentido quando o evento E o merge ja consumado.
 # ---------------------------------------------------------------------------
 name: pr-gates
 
@@ -42,11 +69,30 @@ on:
   pull_request:
     branches: [main]
 
-# Push novo no PR cancela a verificacao antiga: ninguem precisa do resultado
-# de um commit que ja foi substituido.
+  # A main e producao, e este passou a ser o unico lugar onde ela e verificada.
+  push:
+    branches: [main]
+
+# O GRUPO PRECISA DISTINGUIR PUSH DE PR.
+#
+# Em push, `github.event.pull_request.number` e vazio: o grupo antigo viraria o
+# mesmo `pr-gates-` para TODO merge na main, e o segundo merge cancelaria o CI
+# do primeiro. Este repo ja queimou duas vezes com grupo de concorrencia errado
+# (PR #10 e PR #11), as duas com o mesmo sintoma -- trabalho cancelado que
+# ninguem refaz, e todos os workflows verdes.
+#
+# Em PR o recurso protegido e o PR: um push novo substitui o commit anterior,
+# entao cancelar e seguro. Ninguem precisa do resultado de um commit que ja nao
+# esta mais no topo da branch.
+#
+# Em push na main o recurso protegido e O COMMIT, e um merge NAO subsome o
+# anterior: saber que o commit X quebrou o teste continua valendo depois que o Y
+# chegou -- e e exatamente esse o sinal que este gatilho existe para dar. Por
+# isso o grupo cai no github.sha (um grupo por commit, ninguem espera ninguem) e
+# o cancel-in-progress so vale em PR.
 concurrency:
-  group: pr-gates-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: pr-gates-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -58,10 +104,8 @@ jobs:
   # de npm nenhum (docker build e sincronia).
   #
   # A ordem e deliberada: os passos que reprovam com mais frequencia vem antes,
-  # para o log ficar curto no caso comum. `sincronia com a main` fica por
-  # ultimo porque, com o `strict` do ruleset ligado, uma branch atras da main e
-  # situacao rotineira -- reprovar nela primeiro esconderia o resultado de todo
-  # o resto.
+  # para o log ficar curto no caso comum. `sincronia com a main` fica por ultimo
+  # porque e o unico que nao reprova nada -- ele so avisa (ver o bloco dele).
   # -------------------------------------------------------------------------
   gates:
     name: gates do PR
@@ -73,9 +117,11 @@ jobs:
           # Historico completo por causa do gate de sincronia la embaixo, que
           # precisa comparar o HEAD do PR com a main.
           #
-          # O checkout e o merge ref do PR (padrao em `pull_request`), que e o
+          # Em PR o checkout e o merge ref (padrao em `pull_request`), que e o
           # que os outros gates devem verificar: o codigo desta feature JUNTO
-          # com o que ja esta na main.
+          # com o que ja esta na main. Em push na main e o proprio commit
+          # mergeado -- ou seja, o mesmo conteudo, uma vez que ele existe de
+          # verdade.
           fetch-depth: 0
 
       - uses: actions/setup-node@v4
@@ -119,10 +165,19 @@ jobs:
       - name: docker build (gate)
         if: ${{ !cancelled() }}
         env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          # Vazio em push na main -- ver a tag logo abaixo.
+          PR_NUMBER: ${{ github.event.pull_request.number || '' }}
         run: |
+          # `if/fi`, e nao `[ -n "$PR_NUMBER" ] && tag=...`: o shell padrao do
+          # Actions e `bash -e`, e o statement falso derrubaria o passo inteiro
+          # justamente no caso do push.
+          if [ -n "$PR_NUMBER" ]; then
+            tag="pr-${PR_NUMBER}"
+          else
+            tag="main-${GITHUB_SHA:0:7}"
+          fi
           start=$(date +%s)
-          docker build --no-cache -t "derivative-environments:pr-${PR_NUMBER}" .
+          docker build --no-cache -t "derivative-environments:${tag}" .
           elapsed=$(( $(date +%s) - start ))
           echo "docker build levou ${elapsed}s"
           echo "### 🐳 docker build: ${elapsed}s (orcamento: 30s)" >> "$GITHUB_STEP_SUMMARY"
@@ -131,23 +186,42 @@ jobs:
           fi
 
       # -----------------------------------------------------------------
-      # Sincronia com a main
+      # Sincronia com a main -- AVISO, NAO PORTAO
       #
-      # A branch nao pode estar ATRAS da main. Sem isso os gates aprovam um
-      # codigo que nunca foi testado junto com o que ja esta na main.
+      # Ele diz que a branch esta atras da main, e explica o rebase. E o texto
+      # que, quando um PR conflitante e mergeado, avisa quem ficou de fora do
+      # ambiente que chegou a hora de resolver o conflito UMA vez -- contra
+      # codigo real e ja mergeado, e nao contra a branch especulativa de outra
+      # pessoa. Ver bloco 5 do DEMO.md.
       #
-      # Este gate tem um segundo papel no modelo: quando um PR conflitante e
-      # mergeado, e ele que fica vermelho e diz, para quem ficou de fora do
-      # ambiente, que chegou a hora de rebasear e resolver o conflito UMA vez --
-      # contra codigo real e ja mergeado, e nao contra a branch especulativa de
-      # outra pessoa. Ver bloco 5 do DEMO.md.
+      # ⚠️  POR QUE ELE NAO REPROVA
+      #
+      # Ele e um PASSO do job `gates do PR`, e `gates do PR` e contexto EXIGIDO
+      # pelo ruleset da main. Passo vermelho = job vermelho = merge travado.
+      # Entao, reprovando aqui, ele seria o `strict` de volta pela porta dos
+      # fundos -- e na pior versao possivel: uma "strict fotografada", que
+      # bloqueia conforme o ultimo push do PR viu e nao percebe a main andando
+      # depois (ele nao re-executa quando a main anda; nada re-executa).
+      #
+      # O `strict` de verdade esta desligado por decisao escrita (SETUP.md,
+      # secao 3b): prevencao O(N x PRs abertos) trocada pela deteccao O(1) dos
+      # gates rodando na propria main. Reintroduzir meia-strict aqui por
+      # acidente desfaria a decisao e continuaria sem entregar a garantia.
+      #
+      # Entao: `::warning::` e `exit 0`. Quem decide a hora de rebasear e a
+      # pessoa, com a informacao na tela -- nao um portao que ela nao pediu.
       #
       # A comparacao e contra o HEAD REAL do PR, buscado de refs/pull/N/head. O
       # merge ref que esta no workspace nao serve: ele tem a main como ancestral
       # por construcao, entao o gate nunca reprovaria.
+      #
+      # SO EM PR. Em push na main nao existe `refs/pull/N/head` para buscar (o
+      # fetch viraria `refs/pull//head` e falharia), e a pergunta tambem nao faz
+      # sentido: o evento E o merge ja consumado -- a main esta, por definicao,
+      # em dia com ela mesma.
       # -----------------------------------------------------------------
       - name: sincronia com a main
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
@@ -165,13 +239,14 @@ jobs:
           fi
 
           behind=$(git rev-list --count refs/remotes/origin/pr-head..origin/main)
-          echo "::error title=Branch desatualizada::${behind} commit(s) da main nao estao nesta branch."
+          echo "::warning title=Branch desatualizada::${behind} commit(s) da main nao estao nesta branch. Aviso: nao bloqueia o merge."
           {
             echo ""
             echo "Esta branch esta ${behind} commit(s) atras de origin/main."
             echo ""
-            echo "Os gates precisam rodar sobre o codigo desta feature JUNTO com o"
-            echo "que ja esta na main. Rode:"
+            echo "Os gates rodaram sobre esta feature junto com a main de AGORA"
+            echo "(o merge ref do PR), mas esse resultado envelhece: se a main"
+            echo "andar depois deste run, nada aqui re-executa. Para atualizar:"
             echo ""
             echo "  git fetch origin main"
             echo "  git rebase origin/main"
@@ -180,8 +255,13 @@ jobs:
             echo "Se aparecer conflito nesse rebase, e agora que ele se resolve:"
             echo "uma vez so, contra codigo que ja foi revisado e mergeado."
             echo ""
-          } >&2
-          exit 1
+            echo "ESTE PASSO NAO REPROVA. Estar atras da main nao trava o merge"
+            echo "(o strict do ruleset esta desligado de proposito -- SETUP.md,"
+            echo "secao 3b). Quem pega uma main quebrada e o proprio pr-gates,"
+            echo "rodando na main depois do merge."
+            echo ""
+          }
+          exit 0
 
   # -------------------------------------------------------------------------
   # SonarCloud
@@ -192,6 +272,18 @@ jobs:
   # Sem SONAR_TOKEN o passo FALHA e diz o que configurar. Nunca passa verde por
   # ausencia de token: um gate que se desliga sozinho quando falta credencial e
   # pior do que nao ter gate, porque da a impressao de cobertura.
+  #
+  # EM PUSH NA MAIN ELE NAO E REDUNDANTE: e a analise da main que da a baseline
+  # de new code do SonarCloud. Sem nenhuma analise da branch principal, "codigo
+  # novo" nao tem contra o que ser comparado e o Quality Gate do PR fica sem
+  # referencia. A analise de PR (a que roda no gatilho `pull_request`) e sempre
+  # decoracao em cima dessa baseline, nunca a fonte dela.
+  #
+  # O scan action decide sozinho entre analise de branch e analise de PR pelo
+  # contexto do evento -- nao ha parametro para acertar aqui. O que precisa
+  # estar certo e do outro lado: `Automatic Analysis` DESLIGADO no projeto do
+  # SonarCloud (SETUP.md, secao 4, passo 3). Com ele ligado o scan do CI falha,
+  # e agora falharia tambem depois do merge.
   # -------------------------------------------------------------------------
   sonar:
     name: SonarCloud

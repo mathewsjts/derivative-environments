@@ -61,9 +61,9 @@ src/routes/version.ts       GET /version: o conjunto que está no ar
 build-manifest.json         escrito pelo job; a fonte de verdade do /version
 
 .github/workflows/
-  pr-gates.yml              typecheck, lint, testes, audit, docker, Sonar, sincronia
+  pr-gates.yml              typecheck, lint, testes, audit, docker, Sonar — no PR e na main
   rebuild-env.yml           o job que deriva dev e hom da main
-  sync-prs.yml              atualiza os PRs abertos quando a main anda
+  sync-prs.yml              atualiza os PRs marcados com a main, uma vez por dia
   label-ttl.yml             devolve a vaga de PR parado
   reset-env.yml             esvazia um ambiente (manual) tirando todas as labels
   fake-deploy.yml           prova que o push do App dispara workflows
@@ -134,27 +134,41 @@ branch de ambiente: o SHA (para o `--force-with-lease`) e o manifesto (para
 responder "o conjunto mudou?"). Nenhum byte do conteúdo anterior sobrevive — a
 montagem parte sempre de `origin/main`.
 
-**Estar atrasada não exclui uma branch do ambiente.** A montagem sempre parte de
-`origin/main` e faz merge da branch: uma branch atrás da `main` entra
-normalmente enquanto não conflitar. O `sync-prs` existe por outros três motivos
-— com `strict` ligado o PR desatualizado não mergeia; os gates do PR rodariam
-contra uma `main` que não existe mais (que é o "o Sonar reprova depois do merge"
-que este modelo ataca); e quanto mais a branch atrasa, mais provável ela
-conflitar. Ele atualiza com o *Update branch* nativo (merge, sem force-push) e,
-em conflito, **pula e segue** — resolver conflito contra a `main` é trabalho
-humano, feito uma vez, no PR.
+**A `main` tem CI, e é por isso que o `strict` está desligado.** Até aqui nenhum
+workflow rodava num push para a `main` — `pr-gates.yml` só tinha
+`on: pull_request` — e a `main` é produção. O único sinal pós-merge era o
+`docker build` do `rebuild-env`, que apenas compila. Agora os dois jobs rodam
+também no push: dois por merge, sempre os mesmos dois. É uma troca deliberada de
+**prevenção O(N × PRs abertos)** — o `strict` do ruleset, que invalida todos os
+PRs abertos a cada merge — por **detecção O(1)**: a `main` quebrada aparece em
+~60 segundos. O que se perde é a janela em que um PR mergeia validado contra uma
+`main` anterior, e o preço dela é um PR de correção, não uma produção quebrada
+em silêncio. O custo escrito está em [SETUP.md](SETUP.md) §3b.
+
+**Estar atrasada não exclui uma branch do ambiente — e atualizá-la não muda se
+ela conflita.** A montagem sempre parte de `origin/main` e faz merge da branch:
+uma branch atrás da `main` entra normalmente enquanto não conflitar. E o
+`sync-prs` faz `merge main → branch` enquanto o `assemble-env.sh` faz
+`merge branch → main`: mesma base de merge, mesmos dois commits, **mesmo
+conflito**. Atualizar não muda se conflita hoje; muda o *tamanho* do próximo
+merge e a hora em que a pessoa descobre que vai precisar rebasear. Com o
+`strict` desligado (SETUP.md §3b), é isso que sobrou do `sync-prs` — "integre
+cedo, em pedaços pequenos", benefício real e sem urgência — e é por isso que ele
+roda **uma vez por dia**, e não a cada push na `main`. Ele atualiza com o
+*Update branch* nativo (merge, sem force-push) e, em conflito, **pula e segue** —
+resolver conflito contra a `main` é trabalho humano, feito uma vez, no PR.
 
 **E ele só atualiza os PRs marcados com `deploy:*`.** Atualizar todo PR aberto
-transforma um merge na `main` numa rajada: cada atualização é um push, e cada
-push dispara os gates e uma reconstrução. Com 30 PRs abertos, um merge vira ~30
-runs extras — a amplificação cresce com o número de PRs abertos, não com o
-tamanho do time, e é a mais perigosa deste desenho em escala real. Os três
-motivos acima só são urgentes para quem está dentro de um ambiente ou prestes a
-mergear; para o resto, estar atrasado é inofensivo, justamente porque a
-montagem parte da `main`. Um PR sem label que ganhar uma depois é atualizado no
-próximo push na `main` — ou na hora, pelo *Update branch* do próprio PR. Para o
-comportamento antigo, o workflow aceita `only_labeled` desmarcado no disparo
-manual.
+transforma uma execução numa rajada: cada atualização é um push, e cada push
+dispara os gates e uma reconstrução. Com 30 PRs abertos, são ~30 runs extras — a
+amplificação cresce com o número de PRs abertos, não com o tamanho do time, e é
+a mais perigosa deste desenho em escala real. Enquanto ele era reflexo de push
+na `main`, esse número se pagava a cada merge; diário e só nos marcados, ele é
+O(1/dia). Para quem não está em ambiente nenhum, estar atrasado é inofensivo,
+justamente porque a montagem parte da `main`. Um PR sem label que ganhar uma
+depois é atualizado no próximo disparo — ou na hora, pelo *Update branch* do
+próprio PR. Para o comportamento antigo, o workflow aceita `only_labeled`
+desmarcado no disparo manual.
 
 **Quem decide se há trabalho fica fora da fila de concorrência.** O
 `rebuild-env` usa `cancel-in-progress` por ambiente — uma reconstrução parte

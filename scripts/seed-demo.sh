@@ -47,6 +47,118 @@ log "repo   = $REPO"
 log "main   = $(git rev-parse --short origin/main)"
 log "voltar = $ORIGINAL_BRANCH"
 
+# ---------------------------------------------------------------------------
+# A main pre-demo: os quatro blocos de registro vazios, sem nenhuma feature
+# dentro.
+#
+# Isto e uma pre-condicao de verdade, nao um detalhe: o bloco 5 do DEMO.md manda
+# mergear o PR de A na main. Ou seja, todo ensaio COMPLETO termina com a main
+# carregando a feature A -- e o seed seguinte quebra de um jeito silencioso.
+# As branches nascem de origin/main, o insert_before encontra o marcador que ja
+# tem a linha de A logo acima e insere uma SEGUNDA copia. Import duplicado,
+# TypeScript quebrado, e o diff do PR de A vira uma linha repetida em vez de
+# uma feature. Nada disso falha aqui: falha no palco.
+#
+# Checamos os marcadores, e nao a existencia de src/routes/users.ts, porque o
+# que o insert_before quebra e o marcador. E o marcador que tem que estar limpo.
+# ---------------------------------------------------------------------------
+main_esta_limpa() {
+  local idx m
+  idx="$(git show origin/main:src/routes/index.ts 2>/dev/null)" || return 1
+  for m in feature-imports feature-routes observability-imports observability-routes; do
+    printf '%s\n' "$idx" | grep -A1 -- "// $m:start" | grep -q -- "// $m:end" || return 1
+  done
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Rebobina a main revertendo as features de demo que foram mergeadas nela.
+#
+# Por PR, e nao por force-push, porque a main e protegida por um ruleset com
+# non_fast_forward e bypass_actors vazio -- nem o dono do repo passa. Isso e
+# proposital e o script nao contorna: a demo defende que a main so muda por PR,
+# e seria estranho o script dela abrir uma excecao para si mesmo.
+# ---------------------------------------------------------------------------
+rebobinar_main() {
+  local rewind_branch="chore/rebobina-demo"
+  local b sha s pr
+
+  # Os merges das branches de demo que estao mesmo na main. `gh pr list` sozinho
+  # nao basta: um PR pode estar marcado como merged e ter sido revertido depois,
+  # e ai o merge commit ja nao e ancestral da main.
+  local shas=()
+  for b in "${BRANCHES[@]}"; do
+    while read -r sha; do
+      [ -n "$sha" ] || continue
+      git merge-base --is-ancestor "$sha" origin/main 2>/dev/null && shas+=("$sha")
+    done < <(gh pr list --state merged --head "$b" --json mergeCommit --jq '.[].mergeCommit.oid // empty')
+  done
+
+  if [ "${#shas[@]}" -eq 0 ]; then
+    echo "  A main tem feature de demo dentro, mas nao achei o merge para reverter." >&2
+    echo "  Provavelmente alguem commitou direto. Resolva a mao e rode de novo." >&2
+    exit 1
+  fi
+
+  # Do mais novo para o mais velho: revert na ordem cronologica inversa. Fora
+  # dessa ordem, o revert de um merge antigo tenta desfazer linhas que um merge
+  # mais novo ja mexeu, e conflita.
+  local ordered=()
+  while read -r sha; do
+    for s in ${shas[@]+"${shas[@]}"}; do [ "$s" = "$sha" ] && ordered+=("$sha"); done
+  done < <(git rev-list origin/main)
+
+  if [ "${#ordered[@]}" -eq 0 ]; then
+    echo "  Nenhum merge de demo alcancavel a partir da main. Nada a reverter." >&2
+    exit 1
+  fi
+
+  git checkout --quiet -B "$rewind_branch" origin/main
+  for sha in ${ordered[@]+"${ordered[@]}"}; do
+    # Squash e merge commit se revertem diferente, e o DEMO.md diz "Squash ou
+    # Merge, tanto faz" -- entao os dois formatos aparecem aqui. O -m 1 e
+    # obrigatorio num merge (qual mainline desfazer) e ilegal num squash, que
+    # e commit comum de um pai so.
+    if [ "$(git rev-list --parents -n1 "$sha" | wc -w)" -ge 3 ]; then
+      git revert --no-edit -m 1 "$sha" >/dev/null
+    else
+      git revert --no-edit "$sha" >/dev/null
+    fi
+    log "revertido $(git rev-parse --short "$sha")"
+  done
+
+  git push --quiet --force --set-upstream origin "$rewind_branch"
+  pr="$(gh pr list --state open --head "$rewind_branch" --json number --jq '.[0].number // empty')"
+  if [ -z "$pr" ]; then
+    pr="$(gh pr create --base main --head "$rewind_branch" \
+      --title "chore(demo): rebobina a main para o estado pre-demo" \
+      --body "Reverte as features de demo mergeadas na main para que o \`seed-demo.sh --reset\` possa recriar as branches a partir de uma main limpa.
+
+Aberto automaticamente pelo \`scripts/seed-demo.sh --reset\`." | grep -oE '[0-9]+$')"
+  fi
+  log "PR #$pr aberto -- esperando 'gates do PR' e SonarCloud"
+
+  if ! gh pr checks "$pr" --watch --fail-fast >/dev/null 2>&1; then
+    echo "  Os gates do PR #$pr nao passaram. Resolva e rode o seed de novo." >&2
+    exit 1
+  fi
+  gh pr merge "$pr" --merge --delete-branch >/dev/null
+  git fetch --quiet origin main
+  git branch -D "$rewind_branch" >/dev/null 2>&1 || true
+  log "main rebobinada: $(git rev-parse --short origin/main)"
+}
+
+if ! main_esta_limpa; then
+  if [ "$RESET" = true ]; then
+    log "main = tem feature de demo dentro, vou rebobinar no Reset"
+  else
+    echo "A main tem uma feature de demo mergeada dentro dela." >&2
+    echo "Recriar as branches a partir dela duplicaria a linha de registro e quebraria o build." >&2
+    echo "Rode: ./scripts/seed-demo.sh --reset" >&2
+    exit 1
+  fi
+fi
+
 section "Labels"
 ./scripts/create-labels.sh >/dev/null
 log "deploy:dev deploy:hom priority:high blocked:dev blocked:hom"
@@ -56,6 +168,13 @@ log "deploy:dev deploy:hom priority:high blocked:dev blocked:hom"
 # ---------------------------------------------------------------------------
 if [ "$RESET" = true ]; then
   section "Reset"
+
+  # Antes de qualquer destruicao: se a main nao voltar ao estado pre-demo, nao
+  # adianta recriar branch nenhuma. Falhar aqui e muito melhor do que falhar
+  # depois de ja ter fechado os PRs e apagado os ambientes.
+  if ! main_esta_limpa; then
+    rebobinar_main
+  fi
   for b in "${BRANCHES[@]}"; do
     pr="$(gh pr list --state open --head "$b" --json number --jq '.[0].number // empty')"
     if [ -n "$pr" ]; then
